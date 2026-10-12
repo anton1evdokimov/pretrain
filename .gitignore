@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+weights/
+.hf-cache/
+*.egg-info/
+src/video_processing.egg-info/
+third_party/DOVER/.git/
+third_party/DOVER/demo/
+third_party/DOVER/figs/
+third_party/DOVER/dover_predictions/
+third_party/DOVER/*.ipynb
+.python-version
+
+

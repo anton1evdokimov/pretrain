@@ -1,0 +1,21 @@
+input_dir: video
+output_dir: results
+replicate: 8
+warmup_videos: 4
+seed: 42
+
+dover:
+  weights: weights/DOVER.pth
+  config: third_party/DOVER/dover.yml
+  device: auto
+  batch_size: 8
+
+qwen:
+  model_id: Qwen/Qwen3-VL-2B-Instruct
+  prompt: "Сгенерируй детальное описание всего, что происходит на видео"
+  num_frames: 8
+  max_side: 384
+  max_tokens: 256
+  temperature: 0.0
+  batch_size: 4
+  attn_implementation: auto

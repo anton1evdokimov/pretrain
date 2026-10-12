@@ -1,0 +1,33 @@
+[project]
+name = "video-processing"
+version = "0.1.0"
+description = "Pipeline: DOVER quality scores + Qwen3-VL captions"
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "torchvision",
+  "numpy",
+  "opencv-python-headless",
+  "pillow",
+  "pyyaml",
+  "tqdm",
+  "timm>=0.9,<1.1",
+  "einops",
+  "huggingface_hub",
+  "transformers>=4.57.0",
+  "accelerate",
+  "qwen-vl-utils",
+]
+
+[project.optional-dependencies]
+flash = ["flash-attn"]
+
+[project.scripts]
+video-processing = "video_processing.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
