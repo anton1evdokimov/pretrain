@@ -19,6 +19,9 @@ pip install -e .
 pip install flash-attn --no-build-isolation   # опционально, но это один из главных ускорителей
 python scripts/bootstrap.py                   # DOVER-код и DOVER.pth
 python -m video_processing --input video --output results
+
+# точки скорость/качество + батч 8 vs 10 (16 — только если 10 даёт ≥5%)
+python -m video_processing --input video --output results --ablate
 ```
 
 `attn_implementation: auto` сначала пробует FlashAttention-2, затем SDPA.
@@ -68,6 +71,20 @@ python -m video_processing --input video --output results
 - NVDEC вместо CPU-decode на очень длинных роликах.
 - Pipeline parallel: DOVER на одной карте, Qwen на другой.
 - TensorRT для DOVER, если его доля вдруг станет заметной.
+
+## Ablation на A100
+
+```bash
+python -m video_processing --input video --output results --ablate
+```
+
+Три точки visual-бюджета Qwen: `4×256`, `8×384`, `16×384`. Батч Qwen и DOVER: 8 vs 10; 16 только если 10 быстрее 8 хотя бы на 5%. Победитель батча и точка `8×384` (баланс) записываются в `configs/default.yaml`. Сводка — `results/ABLATION.md`.
+
+После аблейшна обычный прогон уже идёт с выбранными батчами:
+
+```bash
+python -m video_processing --input video --output results
+```
 
 ## Конфиг
 

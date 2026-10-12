@@ -56,7 +56,15 @@ def _chunks(items: list, size: int):
         yield items[start : start + size]
 
 
-def run_pipeline(cfg: AppConfig) -> dict:
+def run_pipeline(
+    cfg: AppConfig,
+    *,
+    write_outputs: bool = True,
+    skip_qwen: bool = False,
+    cached_dover_scores: dict | None = None,
+    cached_dover_times: list[float] | None = None,
+    cached_dover_stage_sec: float | None = None,
+) -> dict:
     videos = list_videos(cfg.input_dir)
     jobs = expand_for_throughput(videos, cfg.replicate)
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
@@ -67,72 +75,98 @@ def run_pipeline(cfg: AppConfig) -> dict:
     print(
         f"device={dover.device} gpu={gpu_name()} videos={len(videos)} "
         f"replicate={cfg.replicate} dover_bs={cfg.dover.batch_size} "
-        f"qwen_bs={cfg.qwen.batch_size}"
+        f"qwen_bs={cfg.qwen.batch_size} skip_qwen={skip_qwen} "
+        f"reuse_dover={cached_dover_scores is not None}"
     )
-    dover.load()
-    dover_times: list[float] = []
-    dover_scores: dict[str, dict] = {}
-    dover_t0 = time.perf_counter()
-    n_done = 0
-    for batch in tqdm(list(_chunks(jobs, cfg.dover.batch_size)), desc="DOVER"):
-        paths = [path for _, path in batch]
-        t0 = time.perf_counter()
-        scores = dover.score_batch(paths)
-        sync(dover.device)
-        elapsed = time.perf_counter() - t0
-        per_item = elapsed / max(len(batch), 1)
-        for (copy, path), item in zip(batch, scores):
-            if n_done >= cfg.warmup_videos:
-                dover_times.append(per_item)
-            if copy == 0 and path.name not in dover_scores:
-                dover_scores[path.name] = {**item, "elapsed": per_item}
-            n_done += 1
-    dover_stage_sec = time.perf_counter() - dover_t0
-    dover.unload()
 
-    print(f"Qwen model={cfg.qwen.model_id}")
-    qwen.load()
-    unique_results: dict[str, VideoResult] = {}
-    qwen_times: list[float] = []
-    qwen_t0 = time.perf_counter()
-    n_done = 0
-    prefetch = ThreadPoolExecutor(max_workers=2)
-    job_batches = list(_chunks(jobs, cfg.qwen.batch_size))
-    next_frames = prefetch.submit(_prepare_batch, qwen, job_batches[0]) if job_batches else None
-    try:
-        for i, batch in enumerate(tqdm(job_batches, desc="Qwen3-VL")):
-            prepared = next_frames.result()
-            if i + 1 < len(job_batches):
-                next_frames = prefetch.submit(_prepare_batch, qwen, job_batches[i + 1])
+    if cached_dover_scores is not None:
+        dover_scores = cached_dover_scores
+        dover_times = list(cached_dover_times or [])
+        dover_stage_sec = float(cached_dover_stage_sec or 0.0)
+    else:
+        dover.load()
+        dover_times = []
+        dover_scores = {}
+        dover_t0 = time.perf_counter()
+        n_done = 0
+        for batch in tqdm(list(_chunks(jobs, cfg.dover.batch_size)), desc="DOVER"):
+            paths = [path for _, path in batch]
             t0 = time.perf_counter()
-            texts = qwen.caption_batch(prepared)
-            sync(qwen.device)
+            scores = dover.score_batch(paths)
+            sync(dover.device)
             elapsed = time.perf_counter() - t0
             per_item = elapsed / max(len(batch), 1)
-            for (copy, path), text in zip(batch, texts):
+            for (copy, path), item in zip(batch, scores):
                 if n_done >= cfg.warmup_videos:
-                    qwen_times.append(per_item)
-                if copy == 0 and path.name not in unique_results:
-                    meta = probe_video(path)
-                    scores = dover_scores[path.name]
-                    unique_results[path.name] = VideoResult(
-                        video_id=path.stem,
-                        source=str(path.relative_to(cfg.input_dir)),
-                        duration_sec=round(meta["duration"], 3),
-                        width=meta["width"],
-                        height=meta["height"],
-                        technical=round(scores["technical"], 4),
-                        aesthetic=round(scores["aesthetic"], 4),
-                        overall=round(scores["overall"], 4),
-                        caption=text,
-                        dover_sec=round(scores["elapsed"], 3),
-                        qwen_sec=round(per_item, 3),
-                    )
+                    dover_times.append(per_item)
+                if copy == 0 and path.name not in dover_scores:
+                    dover_scores[path.name] = {**item, "elapsed": per_item}
                 n_done += 1
-    finally:
-        prefetch.shutdown(wait=False)
-        qwen.unload()
-    qwen_stage_sec = time.perf_counter() - qwen_t0
+        dover_stage_sec = time.perf_counter() - dover_t0
+        dover.unload()
+
+    unique_results: dict[str, VideoResult] = {}
+    qwen_times: list[float] = []
+    qwen_stage_sec = 0.0
+    if skip_qwen:
+        for path in videos:
+            scores = dover_scores[path.name]
+            meta = probe_video(path)
+            unique_results[path.name] = VideoResult(
+                video_id=path.stem,
+                source=str(path.relative_to(cfg.input_dir)),
+                duration_sec=round(meta["duration"], 3),
+                width=meta["width"],
+                height=meta["height"],
+                technical=round(scores["technical"], 4),
+                aesthetic=round(scores["aesthetic"], 4),
+                overall=round(scores["overall"], 4),
+                caption="",
+                dover_sec=round(scores["elapsed"], 3),
+                qwen_sec=0.0,
+            )
+    else:
+        print(f"Qwen model={cfg.qwen.model_id}")
+        qwen.load()
+        qwen_t0 = time.perf_counter()
+        n_done = 0
+        prefetch = ThreadPoolExecutor(max_workers=2)
+        job_batches = list(_chunks(jobs, cfg.qwen.batch_size))
+        next_frames = prefetch.submit(_prepare_batch, qwen, job_batches[0]) if job_batches else None
+        try:
+            for i, batch in enumerate(tqdm(job_batches, desc="Qwen3-VL")):
+                prepared = next_frames.result()
+                if i + 1 < len(job_batches):
+                    next_frames = prefetch.submit(_prepare_batch, qwen, job_batches[i + 1])
+                t0 = time.perf_counter()
+                texts = qwen.caption_batch(prepared)
+                sync(qwen.device)
+                elapsed = time.perf_counter() - t0
+                per_item = elapsed / max(len(batch), 1)
+                for (copy, path), text in zip(batch, texts):
+                    if n_done >= cfg.warmup_videos:
+                        qwen_times.append(per_item)
+                    if copy == 0 and path.name not in unique_results:
+                        meta = probe_video(path)
+                        scores = dover_scores[path.name]
+                        unique_results[path.name] = VideoResult(
+                            video_id=path.stem,
+                            source=str(path.relative_to(cfg.input_dir)),
+                            duration_sec=round(meta["duration"], 3),
+                            width=meta["width"],
+                            height=meta["height"],
+                            technical=round(scores["technical"], 4),
+                            aesthetic=round(scores["aesthetic"], 4),
+                            overall=round(scores["overall"], 4),
+                            caption=text,
+                            dover_sec=round(scores["elapsed"], 3),
+                            qwen_sec=round(per_item, 3),
+                        )
+                    n_done += 1
+        finally:
+            prefetch.shutdown(wait=False)
+            qwen.unload()
+        qwen_stage_sec = time.perf_counter() - qwen_t0
 
     results = [unique_results[path.name] for path in videos]
     throughput = _throughput_stats(
@@ -162,8 +196,12 @@ def run_pipeline(cfg: AppConfig) -> dict:
             "gpu": gpu_name(),
             "attn_implementation": qwen.attn_implementation,
         },
+        "dover_scores": dover_scores,
+        "dover_times": dover_times,
+        "dover_stage_sec": dover_stage_sec,
     }
-    _write_outputs(cfg.output_dir, payload)
+    if write_outputs:
+        _write_outputs(cfg.output_dir, payload)
     release_memory()
     return payload
 

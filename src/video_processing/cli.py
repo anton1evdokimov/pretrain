@@ -18,6 +18,11 @@ def main() -> None:
     parser.add_argument("--input", default=None, help="каталог с видео")
     parser.add_argument("--output", default=None, help="каталог результатов")
     parser.add_argument("--replicate", type=int, default=None)
+    parser.add_argument(
+        "--ablate",
+        action="store_true",
+        help="прогон точек скорость/качество и батчей 8/10/(16)",
+    )
     args = parser.parse_args()
 
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -42,6 +47,18 @@ def main() -> None:
             configure_cuda()
     except Exception:
         pass
+
+    if args.ablate:
+        from video_processing.ablate import run_ablation
+
+        report = run_ablation(cfg)
+        chosen = report.get("chosen") or {}
+        print("\n=== ablation done ===")
+        print(f"quality:    {chosen.get('quality')}")
+        print(f"qwen batch: {chosen.get('qwen_batch_size')}")
+        print(f"dover batch:{chosen.get('dover_batch_size')}")
+        print(f"table:      {cfg.output_dir / 'ABLATION.md'}")
+        return
 
     payload = run_pipeline(cfg)
     t = payload["throughput"]
