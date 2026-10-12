@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -90,13 +91,20 @@ class DoverScorer:
     @staticmethod
     def _ensure_third_party() -> None:
         dover_root = ROOT / "third_party" / "DOVER"
-        if not (dover_root / "dover" / "models").exists():
+        pkg_dir = dover_root / "dover"
+        if not (pkg_dir / "models").exists():
             raise RuntimeError(
                 "нет third_party/DOVER. Клонируйте https://github.com/VQAssessment/DOVER"
             )
         root = str(dover_root)
         if root not in sys.path:
             sys.path.insert(0, root)
+        # Official dover/__init__.py imports datasets → decord. We only need the model.
+        pkg = types.ModuleType("dover")
+        pkg.__path__ = [str(pkg_dir)]
+        pkg.__file__ = str(pkg_dir / "__init__.py")
+        pkg.__package__ = "dover"
+        sys.modules["dover"] = pkg
 
     @staticmethod
     def _disable_convnext_imagenet_init() -> None:
