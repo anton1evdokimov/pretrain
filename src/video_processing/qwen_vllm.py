@@ -156,10 +156,6 @@ class VllmCaptioner:
             "messages": [{"role": "user", "content": content}],
             "max_tokens": self.cfg.max_tokens,
             "temperature": self.cfg.temperature,
-            "mm_processor_kwargs": {
-                "min_pixels": 4096,
-                "max_pixels": int(self.cfg.max_side) * int(self.cfg.max_side),
-            },
         }
         return _post_chat(self.api_base, payload)
 
