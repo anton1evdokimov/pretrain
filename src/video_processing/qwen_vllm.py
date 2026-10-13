@@ -173,6 +173,9 @@ class VllmCaptioner:
         # Parent already imported torch. Forked engine workers then die in
         # CUDA init and the API process only reports an empty core-proc set.
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        # Greedy decode never uses top-k/top-p. FlashInfer still JIT-builds
+        # that sampling kernel at warmup and ninja takes the engine down.
+        env["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
         print("vLLM:", " ".join(cmd), flush=True)
         self._proc = subprocess.Popen(
             cmd,
