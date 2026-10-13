@@ -38,6 +38,10 @@ def vllm_serve_command(cfg: QwenConfig, gpu_memory_utilization: float | None = N
     """
     seqs = max(int(cfg.max_num_seqs), int(cfg.batch_size), 1)
     util = cfg.gpu_memory_utilization if gpu_memory_utilization is None else gpu_memory_utilization
+    # Startup profiles the vision encoder at processor max_pixels. Qwen's
+    # default is millions of pixels per frame and OOMs the engine before /health.
+    pixels = max(int(cfg.max_side) * int(cfg.max_side), 4096)
+    mm_kwargs = json.dumps({"min_pixels": 4096, "max_pixels": pixels})
     return [
         sys.executable,
         "-m",
@@ -56,9 +60,10 @@ def vllm_serve_command(cfg: QwenConfig, gpu_memory_utilization: float | None = N
         str(cfg.num_frames),
         "--limit-mm-per-prompt.video",
         "0",
+        "--mm-processor-kwargs",
+        mm_kwargs,
         "--mm-processor-cache-gb",
         "0",
-        "--async-scheduling",
         "--trust-remote-code",
         "--host",
         "127.0.0.1",
@@ -165,6 +170,9 @@ class VllmCaptioner:
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = "1"
         env["TOKENIZERS_PARALLELISM"] = "false"
+        # Parent already imported torch. Forked engine workers then die in
+        # CUDA init and the API process only reports an empty core-proc set.
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         print("vLLM:", " ".join(cmd), flush=True)
         self._proc = subprocess.Popen(
             cmd,
@@ -181,7 +189,7 @@ class VllmCaptioner:
         while time.perf_counter() < deadline:
             if self._proc is not None and self._proc.poll() is not None:
                 raise RuntimeError(
-                    f"vLLM завершился с кодом {self._proc.returncode}\n{_tail(self._log_path)}"
+                    f"vLLM завершился с кодом {self._proc.returncode}\n{_failure_excerpt(self._log_path)}"
                 )
             try:
                 with urllib.request.urlopen(health, timeout=2) as resp:
@@ -190,7 +198,9 @@ class VllmCaptioner:
             except Exception as exc:
                 last_error = exc
             time.sleep(1)
-        raise RuntimeError(f"vLLM не поднялся за {timeout_sec:.0f} с: {last_error}\n{_tail(self._log_path)}")
+        raise RuntimeError(
+            f"vLLM не поднялся за {timeout_sec:.0f} с: {last_error}\n{_failure_excerpt(self._log_path)}"
+        )
 
 
 def _jpeg_data_url(image: Image.Image) -> str:
@@ -217,8 +227,21 @@ def _post_chat(api_base: str, payload: dict) -> str:
     return " ".join(str(text).split()).strip()
 
 
-def _tail(path: Path, n: int = 40) -> str:
+def _failure_excerpt(path: Path) -> str:
+    """The process exit is a short wrapper. The cause is the earlier EngineCore error."""
     if not path.exists():
         return ""
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return "\n".join(lines[-n:])
+    markers = (
+        "EngineCore failed",
+        "OutOfMemory",
+        "Free memory",
+        "CUDA error",
+        "CalledProcessError",
+        "AttributeError",
+        "unrecognized arguments",
+    )
+    for index, line in enumerate(lines):
+        if any(marker in line for marker in markers):
+            return "\n".join(lines[max(0, index - 2) : index + 50])
+    return "\n".join(lines[-80:])

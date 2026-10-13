@@ -102,16 +102,18 @@ FlashAttention-2 включается на пути `qwen.backend: transformers`
 vllm serve Qwen/Qwen3-VL-2B-Instruct \
   --dtype bfloat16 \
   --max-model-len 4096 \
-  --max-num-seqs 8 \
+  --max-num-seqs 32 \
   --gpu-memory-utilization 0.70 \
   --limit-mm-per-prompt.image 8 \
   --limit-mm-per-prompt.video 0 \
+  --mm-processor-kwargs '{"min_pixels": 4096, "max_pixels": 147456}' \
   --mm-processor-cache-gb 0 \
-  --async-scheduling \
   --trust-remote-code \
   --host 127.0.0.1 \
   --port 8000
 ```
+
+`max_pixels` равен `max_side²`. Без него vLLM на старте профилирует кадр дефолтного размера Qwen и падает в `Engine core initialization failed` ещё до `/health`.
 
 30% VRAM, которые остаются DOVER, ему хватает: чекпоинт 229 МБ, батч клипов 224² занимает доли гигабайта, пик активаций — единицы гигабайт. На 80 ГБ это 24 ГБ, на 40 ГБ — 12 ГБ.
 
