@@ -12,5 +12,6 @@ third_party/DOVER/figs/
 third_party/DOVER/dover_predictions/
 third_party/DOVER/*.ipynb
 .python-version
+logs/
 
 

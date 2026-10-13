@@ -3,6 +3,8 @@ output_dir: results
 replicate: 8
 warmup_videos: 4
 seed: 42
+# DOVER и Qwen одновременно: vLLM берёт 70% VRAM, DOVER живёт в остатке.
+parallel: true
 
 dover:
   weights: weights/DOVER.pth
@@ -17,5 +19,13 @@ qwen:
   max_side: 384
   max_tokens: 256
   temperature: 0.0
-  batch_size: 10
+  batch_size: 8
   attn_implementation: auto
+  # При parallel: true пайплайн сам режет долю до 0.70, чтобы рядом жил DOVER.
+  backend: vllm
+  dtype: bfloat16
+  max_model_len: 4096
+  max_num_seqs: 8
+  gpu_memory_utilization: 0.90
+  port: 8000
+  api_base: ""

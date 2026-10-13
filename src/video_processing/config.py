@@ -25,8 +25,15 @@ class QwenConfig:
     max_side: int = 384
     max_tokens: int = 256
     temperature: float = 0.0
-    batch_size: int = 4
+    batch_size: int = 8
     attn_implementation: str = "auto"
+    backend: str = "vllm"
+    max_model_len: int = 4096
+    max_num_seqs: int = 8
+    gpu_memory_utilization: float = 0.90
+    dtype: str = "bfloat16"
+    port: int = 8000
+    api_base: str = ""
 
 
 @dataclass
@@ -36,6 +43,7 @@ class AppConfig:
     replicate: int
     warmup_videos: int
     seed: int
+    parallel: bool
     dover: DoverConfig
     qwen: QwenConfig
 
@@ -58,6 +66,7 @@ def load_config(path: str | Path | None) -> AppConfig:
         replicate=int(raw.get("replicate", 1)),
         warmup_videos=int(raw.get("warmup_videos", 1)),
         seed=int(raw.get("seed", 42)),
+        parallel=bool(raw.get("parallel", True)),
         dover=DoverConfig(
             weights=_as_path(dover_raw.get("weights", "weights/DOVER.pth")),
             config=_as_path(dover_raw.get("config", "third_party/DOVER/dover.yml")),
@@ -76,7 +85,14 @@ def load_config(path: str | Path | None) -> AppConfig:
             max_side=int(qwen_raw.get("max_side", 384)),
             max_tokens=int(qwen_raw.get("max_tokens", 256)),
             temperature=float(qwen_raw.get("temperature", 0.0)),
-            batch_size=int(qwen_raw.get("batch_size", 4)),
+            batch_size=int(qwen_raw.get("batch_size", 8)),
             attn_implementation=str(qwen_raw.get("attn_implementation", "auto")),
+            backend=str(qwen_raw.get("backend", "vllm")),
+            max_model_len=int(qwen_raw.get("max_model_len", 4096)),
+            max_num_seqs=int(qwen_raw.get("max_num_seqs", 8)),
+            gpu_memory_utilization=float(qwen_raw.get("gpu_memory_utilization", 0.90)),
+            dtype=str(qwen_raw.get("dtype", "bfloat16")),
+            port=int(qwen_raw.get("port", 8000)),
+            api_base=str(qwen_raw.get("api_base") or ""),
         ),
     )

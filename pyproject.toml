@@ -21,6 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 flash = ["flash-attn"]
+vllm = ["vllm>=0.11.0"]
 
 [project.scripts]
 video-processing = "video_processing.cli:main"

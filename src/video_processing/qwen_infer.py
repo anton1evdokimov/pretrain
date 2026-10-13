@@ -13,6 +13,16 @@ from video_processing.device import pick_torch_device, release_memory, sync
 USER_PROMPT = "Сгенерируй детальное описание всего, что происходит на видео"
 
 
+def make_captioner(cfg: QwenConfig, device: str = "auto"):
+    if cfg.backend == "vllm":
+        from video_processing.qwen_vllm import VllmCaptioner
+
+        return VllmCaptioner(cfg, device=device)
+    if cfg.backend not in ("transformers", "hf", ""):
+        raise ValueError(f"неизвестный qwen.backend: {cfg.backend}")
+    return QwenCaptioner(cfg, device=device)
+
+
 class QwenCaptioner:
     def __init__(self, cfg: QwenConfig, device: str = "auto"):
         self.cfg = cfg
