@@ -8,7 +8,7 @@ dover:
   weights: weights/DOVER.pth
   config: third_party/DOVER/dover.yml
   device: auto
-  batch_size: 8
+  batch_size: 10
 
 qwen:
   model_id: Qwen/Qwen3-VL-2B-Instruct
@@ -17,5 +17,5 @@ qwen:
   max_side: 384
   max_tokens: 256
   temperature: 0.0
-  batch_size: 4
+  batch_size: 10
   attn_implementation: auto

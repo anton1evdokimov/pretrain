@@ -1,0 +1,17 @@
+{
+  "device": "cuda",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "attn_implementation": "sdpa",
+  "unique_videos": 10,
+  "processed_jobs": 80,
+  "warmup_videos": 10,
+  "stable_samples": 70,
+  "dover_sec_per_video": 2.4569,
+  "qwen_sec_per_video": 1.0207,
+  "pipeline_sec_per_video": 3.4776,
+  "videos_per_sec": 0.287558,
+  "videos_per_hour": 1035.21,
+  "dover_stage_sec": 198.685,
+  "qwen_stage_sec": 99.448,
+  "note": "стабильные числа: среднее после warmup, по репликам датасета, cuda.synchronize()"
+}
