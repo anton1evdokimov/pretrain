@@ -20,7 +20,9 @@ qwen:
   num_frames: 8
   max_side: 384
   max_tokens: 512
-  temperature: 0.0
+  temperature: 0.3
+  # 1.0 — без штрафа. 1.1 режет зацикливание greedy, обычные слова не ломает.
+  repetition_penalty: 1.1
   batch_size: 32
   attn_implementation: auto
   # При parallel: true пайплайн сам режет долю до 0.55, чтобы рядом жил DOVER.

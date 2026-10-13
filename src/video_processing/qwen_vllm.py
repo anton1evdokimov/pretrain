@@ -156,6 +156,7 @@ class VllmCaptioner:
             "messages": [{"role": "user", "content": content}],
             "max_tokens": self.cfg.max_tokens,
             "temperature": self.cfg.temperature,
+            "repetition_penalty": self.cfg.repetition_penalty,
         }
         return _post_chat(self.api_base, payload)
 

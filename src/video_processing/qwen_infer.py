@@ -99,9 +99,12 @@ class QwenCaptioner:
         inputs = _to_device(inputs, self._model.device)
         generate_kwargs = {
             "max_new_tokens": self.cfg.max_tokens,
-            "do_sample": False,
+            "do_sample": self.cfg.temperature > 0,
             "use_cache": True,
+            "repetition_penalty": self.cfg.repetition_penalty,
         }
+        if self.cfg.temperature > 0:
+            generate_kwargs["temperature"] = self.cfg.temperature
         with torch.inference_mode():
             generated = self._model.generate(**inputs, **generate_kwargs)
             sync(self.device)

@@ -26,6 +26,7 @@ class QwenConfig:
     max_side: int = 384
     max_tokens: int = 256
     temperature: float = 0.0
+    repetition_penalty: float = 1.0
     batch_size: int = 8
     attn_implementation: str = "auto"
     backend: str = "vllm"
@@ -87,6 +88,7 @@ def load_config(path: str | Path | None) -> AppConfig:
             max_side=int(qwen_raw.get("max_side", 384)),
             max_tokens=int(qwen_raw.get("max_tokens", 256)),
             temperature=float(qwen_raw.get("temperature", 0.0)),
+            repetition_penalty=float(qwen_raw.get("repetition_penalty", 1.0)),
             batch_size=int(qwen_raw.get("batch_size", 8)),
             attn_implementation=str(qwen_raw.get("attn_implementation", "auto")),
             backend=str(qwen_raw.get("backend", "vllm")),
