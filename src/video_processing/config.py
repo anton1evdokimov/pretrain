@@ -15,6 +15,7 @@ class DoverConfig:
     config: Path
     device: str = "auto"
     batch_size: int = 8
+    decode_workers: int = 0
 
 
 @dataclass
@@ -72,6 +73,7 @@ def load_config(path: str | Path | None) -> AppConfig:
             config=_as_path(dover_raw.get("config", "third_party/DOVER/dover.yml")),
             device=str(dover_raw.get("device", "auto")),
             batch_size=int(dover_raw.get("batch_size", 8)),
+            decode_workers=int(dover_raw.get("decode_workers", 0)),
         ),
         qwen=QwenConfig(
             model_id=str(qwen_raw.get("model_id", "Qwen/Qwen3-VL-2B-Instruct")),

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import queue
 import statistics
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -58,7 +58,8 @@ def _chunks(items: list, size: int):
         yield items[start : start + size]
 
 
-# vLLM's fraction is of the whole GPU, so DOVER needs the rest to stay resident.
+# vLLM process reserves this slice; DOVER allocates in the parent from the rest.
+# 2B bf16 + 32 seqs fit in ~10–20 GB. 70% of 80 GB leaves ~24 GB for DOVER.
 OVERLAP_VLLM_FRACTION = 0.70
 
 
@@ -71,24 +72,6 @@ def _advance_overlap(state: dict, batch_len: int, now: float, warmup: int) -> No
     if state.get("t0") is not None:
         state["stable_jobs"] = int(state.get("stable_jobs", 0)) + batch_len
         state["t1"] = now
-
-
-def _put_until(work: queue.Queue, item, stop: threading.Event, timeout_sec: float | None = None) -> bool:
-    deadline = None if timeout_sec is None else time.perf_counter() + timeout_sec
-    while True:
-        if stop.is_set():
-            try:
-                work.put(item, timeout=0.2)
-                return True
-            except queue.Full:
-                return False
-        if deadline is not None and time.perf_counter() >= deadline:
-            return False
-        try:
-            work.put(item, timeout=0.2)
-            return True
-        except queue.Full:
-            continue
 
 
 def run_pipeline(
@@ -265,124 +248,142 @@ def run_pipeline(
 
 
 def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
-    """DOVER on this process, Qwen at the same time.
+    """Both models get the full job list from t=0.
 
-    vLLM is a child process, so its kernels and DOVER's kernels share the GPU.
-    The queue depth is two batches: while Qwen captions one batch, DOVER scores the next.
+    vLLM is a child process and already owns its VRAM slice; DOVER stays in
+    the parent. Captions do not wait for scores. A job counts as done for
+    wall-clock when both stages have finished that index.
     """
-    work: queue.Queue = queue.Queue(maxsize=2)
     stop = threading.Event()
     errors: list[BaseException] = []
+    lock = threading.Lock()
+    gpu_lock = threading.Lock() if cfg.qwen.backend != "vllm" else nullcontext()
     dover_scores: dict = {}
     dover_times: list[float] = []
     qwen_times: list[float] = []
-    unique_results: dict[str, VideoResult] = {}
+    captions: dict[str, tuple[str, float]] = {}
     overlap = {"finished": 0, "stable_jobs": 0, "t0": None, "t1": None}
-    dover_batches = list(_chunks(jobs, cfg.dover.batch_size))
-    consumer_started = False
+    dover_done: dict[int, float] = {}
+    qwen_done: dict[int, float] = {}
+
+    def _mark(kind: str, start: int, count: int, now: float) -> None:
+        with lock:
+            store = dover_done if kind == "dover" else qwen_done
+            newly = 0
+            done_at = now
+            for index in range(start, start + count):
+                store[index] = now
+                if index in dover_done and index in qwen_done:
+                    newly += 1
+                    done_at = max(dover_done[index], qwen_done[index])
+            if newly:
+                _advance_overlap(overlap, newly, done_at, cfg.warmup_videos)
 
     def produce() -> None:
         n_done = 0
-        dover_t0 = time.perf_counter()
+        stage_t0 = time.perf_counter()
         try:
-            for batch in tqdm(dover_batches, desc="DOVER", position=0):
+            for batch in tqdm(
+                list(_chunks(jobs, cfg.dover.batch_size)), desc="DOVER", position=0
+            ):
                 if stop.is_set():
                     break
                 paths = [path for _, path in batch]
                 t0 = time.perf_counter()
-                scores = dover.score_batch(paths)
-                sync(dover.device)
+                with gpu_lock:
+                    scores = dover.score_batch(paths)
+                    sync(dover.device)
                 elapsed = time.perf_counter() - t0
                 per_item = elapsed / max(len(batch), 1)
-                scored = []
+                start = n_done
                 for (copy, path), item in zip(batch, scores):
                     if n_done >= cfg.warmup_videos:
                         dover_times.append(per_item)
                     if copy == 0 and path.name not in dover_scores:
                         dover_scores[path.name] = {**item, "elapsed": per_item}
-                    scored.append((n_done, copy, path, item, per_item))
                     n_done += 1
-                if not _put_until(work, scored, stop):
-                    break
+                _mark("dover", start, len(batch), time.perf_counter())
         except BaseException as exc:
             errors.append(exc)
             stop.set()
         finally:
-            _put_until(work, None, stop)
-            overlap["dover_stage_sec"] = time.perf_counter() - dover_t0
+            overlap["dover_stage_sec"] = time.perf_counter() - stage_t0
 
     def consume() -> None:
-        qwen_t0 = time.perf_counter()
+        prefetch = ThreadPoolExecutor(max_workers=2)
+        job_batches = list(_chunks(jobs, cfg.qwen.batch_size))
+        next_frames = prefetch.submit(_prepare_batch, qwen, job_batches[0]) if job_batches else None
+        n_done = 0
+        stage_t0 = time.perf_counter()
         try:
-            pending: list[tuple] = []
-            bar = tqdm(total=len(jobs), desc="Qwen3-VL", position=1)
-            while True:
-                if stop.is_set() and work.empty():
+            for i, batch in enumerate(tqdm(job_batches, desc="Qwen3-VL", position=1)):
+                if stop.is_set():
                     break
-                try:
-                    item = work.get(timeout=0.2)
-                except queue.Empty:
-                    continue
-                if item is None:
-                    break
-                pending.extend(item)
-                while len(pending) >= cfg.qwen.batch_size:
-                    _caption_slice(pending[: cfg.qwen.batch_size], bar)
-                    del pending[: cfg.qwen.batch_size]
-            if pending and not stop.is_set():
-                _caption_slice(pending, bar)
-            bar.close()
+                prepared = next_frames.result()
+                if i + 1 < len(job_batches):
+                    next_frames = prefetch.submit(_prepare_batch, qwen, job_batches[i + 1])
+                t0 = time.perf_counter()
+                with gpu_lock:
+                    texts = qwen.caption_batch(prepared)
+                    if cfg.qwen.backend != "vllm":
+                        sync(qwen.device)
+                elapsed = time.perf_counter() - t0
+                per_item = elapsed / max(len(batch), 1)
+                start = n_done
+                for (copy, path), text in zip(batch, texts):
+                    if n_done >= cfg.warmup_videos:
+                        qwen_times.append(per_item)
+                    if copy == 0 and path.name not in captions:
+                        captions[path.name] = (text, per_item)
+                    n_done += 1
+                _mark("qwen", start, len(batch), time.perf_counter())
         except BaseException as exc:
             errors.append(exc)
             stop.set()
         finally:
-            overlap["qwen_stage_sec"] = time.perf_counter() - qwen_t0
-            stop.set()
+            prefetch.shutdown(wait=False)
+            overlap["qwen_stage_sec"] = time.perf_counter() - stage_t0
 
-    def _caption_slice(scored: list[tuple], bar: tqdm) -> None:
-        prepared = [(path, qwen.prepare_frames(path)) for _, _, path, _, _ in scored]
-        t0 = time.perf_counter()
-        texts = qwen.caption_batch(prepared)
-        sync(qwen.device)
-        elapsed = time.perf_counter() - t0
-        per_item = elapsed / max(len(scored), 1)
-        now = time.perf_counter()
-        for (index, copy, path, scores, dover_sec), text in zip(scored, texts):
-            if index >= cfg.warmup_videos:
-                qwen_times.append(per_item)
-            if copy == 0 and path.name not in unique_results:
-                meta = probe_video(path)
-                unique_results[path.name] = VideoResult(
-                    video_id=path.stem,
-                    source=str(path.relative_to(cfg.input_dir)),
-                    duration_sec=round(meta["duration"], 3),
-                    width=meta["width"],
-                    height=meta["height"],
-                    technical=round(scores["technical"], 4),
-                    aesthetic=round(scores["aesthetic"], 4),
-                    overall=round(scores["overall"], 4),
-                    caption=text,
-                    dover_sec=round(dover_sec, 3),
-                    qwen_sec=round(per_item, 3),
-                )
-        _advance_overlap(overlap, len(scored), now, cfg.warmup_videos)
-        bar.update(len(scored))
-
-    thread = threading.Thread(target=consume, name="qwen-overlap")
+    qwen_thread = threading.Thread(target=consume, name="qwen-overlap")
+    dover_thread = threading.Thread(target=produce, name="dover-overlap")
     try:
         _load_qwen(qwen, cfg, overlapped=True)
         dover.load()
-        thread.start()
-        consumer_started = True
-        produce()
+        qwen_thread.start()
+        dover_thread.start()
+        qwen_thread.join()
+        dover_thread.join()
     finally:
-        if consumer_started:
-            _put_until(work, None, stop)
-            thread.join()
+        stop.set()
+        if qwen_thread.is_alive():
+            qwen_thread.join()
+        if dover_thread.is_alive():
+            dover_thread.join()
         dover.unload()
         qwen.unload()
     if errors:
         raise errors[0]
+
+    unique_results: dict[str, VideoResult] = {}
+    for copy, path in jobs:
+        if copy != 0 or path.name in unique_results:
+            continue
+        scores = dover_scores[path.name]
+        text, qwen_sec = captions.get(path.name, ("", 0.0))
+        meta = probe_video(path)
+        unique_results[path.name] = VideoResult(
+            video_id=path.stem,
+            source=str(path.relative_to(cfg.input_dir)),
+            duration_sec=round(meta["duration"], 3),
+            width=meta["width"],
+            height=meta["height"],
+            technical=round(scores["technical"], 4),
+            aesthetic=round(scores["aesthetic"], 4),
+            overall=round(scores["overall"], 4),
+            caption=text,
+            dover_sec=round(scores["elapsed"], 3),
+            qwen_sec=round(qwen_sec, 3),
+        )
     wall = 0.0
     stable = int(overlap.get("stable_jobs") or 0)
     if overlap.get("t0") is not None and overlap.get("t1") is not None:

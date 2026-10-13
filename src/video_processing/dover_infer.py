@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import sys
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -63,10 +65,29 @@ class DoverScorer:
     def score_batch(self, paths: list[Path]) -> list[dict[str, float]]:
         if self._model is None:
             self.load()
-        prepared = []
-        for path in paths:
-            views = decompose_video(path, self._sample_types, self._samplers)
-            prepared.append(normalize_and_split(views, self._sample_types, self.device))
+        workers = self.cfg.decode_workers
+        if workers <= 0:
+            workers = min(len(paths), os.cpu_count() or 8)
+        workers = max(1, min(workers, len(paths)))
+        ffmpeg_threads = 1 if workers > 1 else 0
+
+        def _views(path: Path):
+            return decompose_video(
+                path,
+                self._sample_types,
+                self._samplers,
+                ffmpeg_threads=ffmpeg_threads,
+            )
+
+        if workers == 1:
+            views_list = [_views(path) for path in paths]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                views_list = list(pool.map(_views, paths))
+        prepared = [
+            normalize_and_split(views, self._sample_types, self.device)
+            for views in views_list
+        ]
 
         aesthetic = torch.cat([item["aesthetic"] for item in prepared], dim=0)
         technical = torch.cat([item["technical"] for item in prepared], dim=0)

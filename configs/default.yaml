@@ -10,22 +10,24 @@ dover:
   weights: weights/DOVER.pth
   config: third_party/DOVER/dover.yml
   device: auto
-  batch_size: 10
+  batch_size: 16
+  # 0 = min(batch_size, CPU). Каждый воркер — свой ffmpeg select по индексам.
+  decode_workers: 0
 
 qwen:
   model_id: Qwen/Qwen3-VL-2B-Instruct
   prompt: "Сгенерируй детальное описание всего, что происходит на видео"
   num_frames: 8
   max_side: 384
-  max_tokens: 256
+  max_tokens: 512
   temperature: 0.0
-  batch_size: 8
+  batch_size: 32
   attn_implementation: auto
   # При parallel: true пайплайн сам режет долю до 0.70, чтобы рядом жил DOVER.
   backend: vllm
   dtype: bfloat16
   max_model_len: 4096
-  max_num_seqs: 8
+  max_num_seqs: 32
   gpu_memory_utilization: 0.90
   port: 8000
   api_base: ""

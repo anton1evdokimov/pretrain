@@ -7,13 +7,15 @@ clip in memory: each decoded frame is immediately copied into 224x224 views.
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Lock
 
-import cv2
 import numpy as np
 import torch
 import torchvision
 
-from video_processing.decode import probe_video
+from video_processing.decode import iter_selected_rgb_frames, probe_video
+
+_SAMPLER_LOCK = Lock()
 
 MEAN = torch.FloatTensor([123.675, 116.28, 103.53])
 STD = torch.FloatTensor([58.395, 57.12, 57.375])
@@ -125,13 +127,18 @@ def _resize_to_chw(rgb: np.ndarray, size_h: int, size_w: int) -> torch.Tensor:
     return resized
 
 
-def decompose_video(path: Path, sample_types: dict, samplers: dict[str, UnifiedFrameSampler]) -> dict[str, torch.Tensor]:
+def decompose_video(
+    path: Path,
+    sample_types: dict,
+    samplers: dict[str, UnifiedFrameSampler],
+    ffmpeg_threads: int = 1,
+) -> dict[str, torch.Tensor]:
     meta = probe_video(path)
     n_frames = max(int(meta["nb_frames"]), 1)
     width, height = int(meta["width"]), int(meta["height"])
-    frame_inds = {stype: sampler(n_frames) for stype, sampler in samplers.items()}
+    with _SAMPLER_LOCK:
+        frame_inds = {stype: sampler(n_frames) for stype, sampler in samplers.items()}
     needed = sorted({int(i) for inds in frame_inds.values() for i in inds.tolist()})
-    needed_set = set(needed)
 
     aesthetic_inds = frame_inds.get("aesthetic")
     technical_inds = frame_inds.get("technical")
@@ -162,29 +169,13 @@ def decompose_video(path: Path, sample_types: dict, samplers: dict[str, UnifiedF
         for t, src in enumerate(technical_inds.tolist()):
             tech_slots.setdefault(int(src), []).append(t)
 
-    cap = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        raise RuntimeError(f"не удалось открыть видео: {path}")
-    idx = 0
-    last = max(needed) if needed else -1
-    filled = 0
-    try:
-        while idx <= last:
-            ok, bgr = cap.read()
-            if not ok:
-                break
-            if idx in needed_set:
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                for t in aes_slots.get(idx, []):
-                    aesthetic[:, t] = _resize_to_chw(rgb, aes_opt["size_h"], aes_opt["size_w"])
-                for t in tech_slots.get(idx, []):
-                    _fill_fragments(technical, rgb, t, tech_coords)
-                filled += 1
-                if filled == len(needed_set):
-                    break
-            idx += 1
-    finally:
-        cap.release()
+    for idx, rgb in iter_selected_rgb_frames(
+        path, needed, width, height, ffmpeg_threads=ffmpeg_threads
+    ):
+        for t in aes_slots.get(idx, []):
+            aesthetic[:, t] = _resize_to_chw(rgb, aes_opt["size_h"], aes_opt["size_w"])
+        for t in tech_slots.get(idx, []):
+            _fill_fragments(technical, rgb, t, tech_coords)
 
     views = {}
     # порядок как в official evaluate_a_set_of_videos: aesthetic, technical
