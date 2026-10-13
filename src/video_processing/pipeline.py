@@ -59,8 +59,9 @@ def _chunks(items: list, size: int):
 
 
 # vLLM process reserves this slice; DOVER allocates in the parent from the rest.
-# 2B bf16 + 32 seqs fit in ~10–20 GB. 70% of 80 GB leaves ~24 GB for DOVER.
-OVERLAP_VLLM_FRACTION = 0.70
+# 2B bf16 does not need 70%. At batch 16 the DOVER forward asks for ~11 GiB
+
+OVERLAP_VLLM_FRACTION = 0.50
 
 
 def _advance_overlap(state: dict, batch_len: int, now: float, warmup: int) -> None:

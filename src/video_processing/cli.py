@@ -1,7 +1,17 @@
 from __future__ import annotations
 
-import argparse
 import os
+
+# Before the CUDA caching allocator starts. DOVER's batch-16 activation is one
+# ~11 GiB block; without this, PyTorch holds that much in fragments and the
+# new block fails even though the sum of free cache would cover it.
+_alloc = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+if "expandable_segments" not in _alloc:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (
+        f"{_alloc},expandable_segments:True".lstrip(",")
+    )
+
+import argparse
 import random
 from pathlib import Path
 

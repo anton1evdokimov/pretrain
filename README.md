@@ -31,9 +31,9 @@ python -m video_processing --input video --output results --ablate
 ## Что делает один прогон
 
 1. Собирает ролики и размножает список в `replicate` копий.
-2. Поднимает vLLM с Qwen3-VL-2B в bf16. При `parallel: true` сервер берёт 70% VRAM.
+2. Поднимает vLLM с Qwen3-VL-2B в bf16. При `parallel: true` сервер берёт 50% VRAM.
 3. Загружает DOVER в оставшуюся память.
-4. Считает оба фильтра одновременно с t=0: Qwen и DOVER получают один и тот же список роликов. Подпись не ждёт оценку. На 80 ГБ vLLM берёт 70% VRAM (~56 ГБ), DOVER живёт в остальных ~24 ГБ.
+4. Считает оба фильтра одновременно с t=0: Qwen и DOVER получают один и тот же список роликов. Подпись не ждёт оценку. На 80 ГБ vLLM берёт 50% VRAM (~40 ГБ), DOVER живёт в остальных ~40 ГБ.
 5. После `warmup_videos` считает видео/с по wall-clock перекрытия, а не по сумме стадий.
 6. Пишет оценки и описания только для исходных десяти файлов и останавливает vLLM.
 
@@ -103,7 +103,7 @@ vllm serve Qwen/Qwen3-VL-2B-Instruct \
   --dtype bfloat16 \
   --max-model-len 4096 \
   --max-num-seqs 32 \
-  --gpu-memory-utilization 0.70 \
+  --gpu-memory-utilization 0.50 \
   --limit-mm-per-prompt.image 8 \
   --limit-mm-per-prompt.video 0 \
   --mm-processor-kwargs '{"min_pixels": 4096, "max_pixels": 147456}' \
@@ -115,7 +115,7 @@ vllm serve Qwen/Qwen3-VL-2B-Instruct \
 
 `max_pixels` равен `max_side²`. Без него vLLM на старте профилирует кадр дефолтного размера Qwen и падает в `Engine core initialization failed` ещё до `/health`.
 
-30% VRAM, которые остаются DOVER, ему хватает: чекпоинт 229 МБ, батч клипов 224² занимает доли гигабайта, пик активаций — единицы гигабайт. На 80 ГБ это 24 ГБ, на 40 ГБ — 12 ГБ.
+На батче 16 к моменту OOM у DOVER уже занято 23 ГБ живых тензоров и ещё 10 ГБ сидит в кэше аллокатора. Следующий блок forward просит 10.6 ГБ. Веса DOVER — 229 МБ, в этих 23 ГБ их почти нет. Пик тензоров около 34 ГБ, а вместе с фрагментами процесс хочет ~44 ГБ. Половина карты под vLLM столько не оставляет, поэтому в конфиге батч DOVER — 8.
 
 ## Ablation
 
@@ -133,7 +133,7 @@ Ablation гоняет стадии по отдельности и переисп
 
 | Ключ | Смысл |
 |---|---|
-| `parallel` | `true` — DOVER и Qwen одновременно, vLLM на 70%. `false` — сначала весь DOVER, потом Qwen. |
+| `parallel` | `true` — DOVER и Qwen одновременно, vLLM на 50%. `false` — сначала весь DOVER, потом Qwen. |
 | `replicate` | Сколько копий набора прогнать ради стабильной скорости. |
 | `warmup_videos` | Сколько первых роликов не входит в видео/с. |
 | `dover.batch_size` | Роликов в одном forward DOVER. |
@@ -141,4 +141,4 @@ Ablation гоняет стадии по отдельности и переисп
 | `qwen.batch_size`, `qwen.max_num_seqs` | Сколько роликов Qwen держит одновременно. Имеет смысл поднимать парой. |
 | `qwen.max_model_len` | Потолок контекста vLLM. Для 8 кадров хватает 4096. |
 | `qwen.backend` | `vllm` или `transformers`. |
-| `qwen.gpu_memory_utilization` | Доля VRAM в последовательном режиме. В параллельном пайплайн подставляет 0.70. |
+| `qwen.gpu_memory_utilization` | Доля VRAM в последовательном режиме. В параллельном пайплайн подставляет 0.50. |

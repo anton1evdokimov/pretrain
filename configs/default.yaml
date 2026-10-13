@@ -3,16 +3,16 @@ output_dir: results
 replicate: 8
 warmup_videos: 4
 seed: 42
-# DOVER и Qwen одновременно: vLLM берёт 70% VRAM, DOVER живёт в остатке.
+# DOVER и Qwen одновременно: vLLM берёт 50% VRAM, DOVER живёт в остатке.
 parallel: true
 
 dover:
   weights: weights/DOVER.pth
   config: third_party/DOVER/dover.yml
   device: auto
-  batch_size: 16
-  # 0 = min(batch_size, CPU). Каждый воркер — свой ffmpeg select по индексам.
-  decode_workers: 0
+  batch_size: 8
+  # По одному ffmpeg на ролик в батче.
+  decode_workers: 8
 
 qwen:
   model_id: Qwen/Qwen3-VL-2B-Instruct
@@ -23,7 +23,7 @@ qwen:
   temperature: 0.0
   batch_size: 32
   attn_implementation: auto
-  # При parallel: true пайплайн сам режет долю до 0.70, чтобы рядом жил DOVER.
+  # При parallel: true пайплайн сам режет долю до 0.55, чтобы рядом жил DOVER.
   backend: vllm
   dtype: bfloat16
   max_model_len: 4096

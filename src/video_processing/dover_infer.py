@@ -94,6 +94,9 @@ class DoverScorer:
         aes_clips = self._sample_types["aesthetic"].get("num_clips", 1)
         tech_clips = self._sample_types["technical"].get("num_clips", 1)
         clips = {"aesthetic": aesthetic, "technical": technical}
+        del views_list, prepared
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
 
         with torch.inference_mode():
             raw = self._model(clips, reduce_scores=False)
