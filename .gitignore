@@ -15,3 +15,5 @@ third_party/DOVER/*.ipynb
 logs/
 
 
+.ipynb_checkpoints/
+results/

@@ -1,11 +1,11 @@
 # Video Processing
 
-Пайплайн для NVIDIA A100. На каждом ролике две модели:
+Пайплайн для одной NVIDIA A100. На каждом ролике две модели:
 
 1. **DOVER** — техническое и эстетическое качество, плюс общая оценка. Шкала `[0, 1]`, fusion как в официальном `evaluate_a_set_of_videos.py` на конфиге `val-l1080p`.
-2. **Qwen3-VL-2B-Instruct** — описание. Промпт фиксирован: «Сгенерируй детальное описание всего, что происходит на видео».
+2. **Qwen3-VL-2B-Instruct** — описание. Промпт задания уходит модели дословно: «Сгенерируй детальное описание всего, что происходит на видео». Перед ним стоит системное сообщение, которое просит писать кратко и без выдумок (см. [Конфиг](#конфиг)).
 
-В `video/` десять роликов. Для выхода на стабильную скорость набор размножается (`replicate: 8`). В таблицу качества попадают только оригинальные десять файлов.
+Скорость на A100 80 ГБ — **3.40 видео/с в установившемся режиме** (около 12 200 видео в час), замер на 640 заданиях (`configs/final_r64.yaml`, `results_final/`). Загрузка моделей — ещё около 50 с, один раз. Первый корректный замер был 0.69 видео/с. Что и почему ускоряли — в [REPORT.md](REPORT.md).
 
 ## Запуск
 
@@ -13,132 +13,94 @@
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# torch, torchvision и torchcodec одной CUDA-сборки (на сервере — cu130)
+pip install torch torchvision torchcodec --index-url https://download.pytorch.org/whl/cu130
 pip install -e '.[vllm]'
-pip install flash-attn --no-build-isolation   # опционально: FlashAttention-2 для пути transformers
 python scripts/bootstrap.py                   # код DOVER и weights/DOVER.pth
-python -m video_processing --input video --output results
+python -m video_processing                    # configs/default.yaml → results/
 ```
 
-Пайплайн сам поднимает vLLM и сам его гасит. Отдельный `python scripts/serve_qwen.py` нужен только чтобы посмотреть endpoint вручную. Вместе с пайплайном его запускать не нужно: оба займут порт 8000 и одну и ту же память.
-
-Ablation, если нужно выбрать батч и бюджет кадров по замерам:
-
-```bash
-python -m video_processing --input video --output results --ablate
-```
+- Другой конфиг: `--config configs/....yaml`. Каталоги и число копий: `--input`, `--output`, `--replicate`.
+- Пайплайн сам поднимает vLLM и сам его гасит. `scripts/serve_qwen.py` нужен, только чтобы посмотреть endpoint вручную. Вместе с пайплайном его не запускать: оба займут порт 8000 и одну и ту же память.
+- Без `torchcodec` или без NVDEC каждый ролик автоматически уходит на ffmpeg на CPU. В stderr при этом пишется `[dover] NVDEC: … → cpu` или `[qwen] NVDEC: … → cpu`. Результат тот же, только медленнее.
 
 ## Что делает один прогон
 
-1. Собирает ролики и размножает список в `replicate` копий.
-2. Поднимает vLLM с Qwen3-VL-2B в bf16. При `parallel: true` сервер берёт 50% VRAM.
-3. Загружает DOVER в оставшуюся память.
-4. Считает оба фильтра одновременно с t=0: Qwen и DOVER получают один и тот же список роликов. Подпись не ждёт оценку. На 80 ГБ vLLM берёт 50% VRAM (~40 ГБ), DOVER живёт в остальных ~40 ГБ.
-5. После `warmup_videos` считает видео/с по wall-clock перекрытия, а не по сумме стадий.
-6. Пишет оценки и описания только для исходных десяти файлов и останавливает vLLM.
+1. Собирает ролики из `video/` и размножает список до `replicate` копий, чтобы выйти на установившуюся скорость.
+2. Поднимает vLLM с Qwen3-VL-2B в bf16 на 50% VRAM и загружает DOVER в оставшуюся память. Загрузка считается отдельно от скорости (`load_sec`).
+3. Запускает обе модели одновременно на одном списке роликов:
+   - **DOVER.** Пул потоков готовит ролики без барьера на границе батча. Кадры декодирует NVDEC, виды aesthetic и technical собираются на GPU. Forward идёт батчами по `dover.batch_size`.
+   - **Qwen.** Каждый ролик — отдельная задача: 8 кадров через NVDEC, уменьшение до 384 px по длинной стороне, запрос в vLLM. Кадры одновременно готовятся не больше чем для `qwen.decode_workers` роликов, в vLLM одновременно до `max_num_seqs` запросов. Готовая подпись сразу освобождает место следующей.
+4. Считает видео/с по wall-clock (см. [Результаты](#результаты)).
+5. Пишет оценки и описания и останавливает vLLM.
 
-`parallel: false` возвращает старый порядок: сначала весь DOVER, потом Qwen. В этом режиме vLLM берёт `gpu_memory_utilization` из конфига (0.90).
+`parallel: false` — сначала весь DOVER, потом Qwen, vLLM берёт `gpu_memory_utilization` из конфига. `qwen.continuous: false` — прежняя подача пачками по `qwen.batch_size`.
 
 ## Результаты
 
-- `results/RESULTS.md` — таблица technical / aesthetic / overall и описания
-- `results/results.json`, `results/results.csv` — то же самое
-- `results/throughput.json` — стабильная пропускная способность
-- `results/ABLATION.md` — только после `--ablate`
-
-## Оптимизации
-
-Узкое место — Qwen, не DOVER. В код вошло то, что двигает видео/с всего пайплайна.
-
-### Высокое влияние
-
-| Приём | Зачем |
+| Файл | Что внутри |
 |---|---|
-| 8 кадров, длинная сторона 384 | Время Qwen растёт почти линейно с числом патчей. Полный 1440p/25 fps даёт лишние порядки compute и KV. |
-| bf16, greedy, `max_tokens=256` | Sampling и длинный хвост почти не добавляют фактов и линейно растягивают decode. |
-| vLLM, `max_num_seqs=8`, контекст 4096 | Короткая подпись освобождает слот. Статический `generate` держит весь батч до самой длинной. 8 кадров и 256 новых токенов укладываются примерно в 2k токенов, поэтому контекст обрезан до 4096. |
-| Батч Qwen 8 и батч DOVER | Один ролик не загружает A100. Чанк Qwen заполняет `max_num_seqs`. У DOVER клипы фиксированы, 224². |
-| DOVER и Qwen одновременно | На 80 ГБ обе модели живут вместе. Секунда пайплайна стремится ко времени более медленной стадии. |
-| Модели грузятся один раз | vLLM — отдельный процесс, DOVER — в родительском. |
-| Prefetch кадров | Следующий чанк декодируется на CPU, пока GPU занят текущим. |
-| ffmpeg `select=eq(n,…)` и параллельный decode в `score_batch` | DOVER не гоняет полный RGB-скан OpenCV и не декодирует батч по одному ролику. `decode_workers: 0` — по числу роликов в батче. Тензоры на GPU собираются уже в главном потоке. |
-| `replicate` и warmup | Десять роликов — это ещё прогрев CUDA. Стабильные видео/с считаются после него. |
+| `RESULTS.md` | Скорость, сводка подписей по всем копиям, таблица technical / aesthetic / overall и описаний копии 0 |
+| `results.json`, `results.csv` | Оценки и описания копии 0. В JSON ещё `caption_stats` и `captions_all` |
+| `captions_all.jsonl` | Подписи всех заданий: `finish_reason`, число слов, доля уникальных 8-грамм, токенов промпта |
+| `throughput.json` | Скорость |
 
-FlashAttention-2 включается на пути `qwen.backend: transformers` (`attn_implementation: auto`). На пути vLLM attention выбирает сам сервер.
+Поля `throughput.json`:
 
-### Среднее влияние
-
-Сделано точечно, без отдельного разгона:
-
-- У Swin в DOVER выключен activation checkpointing, иначе eval считает граф дважды.
-- ConvNeXt не качает ImageNet-init: `DOVER.pth` и так перезаписывает веса.
-- Фрагменты DOVER собираются сразу в 224², полный кадр в RAM не держится.
-- Кадры DOVER и Qwen читаются ffmpeg по списку индексов; OpenCV остаётся запасным путём, если pipe короткий.
-- Для фиксированных шейпов DOVER включены TF32 и `cudnn.benchmark`. Веса DOVER остаются в fp32, чтобы не сдвигать официальный fusion.
-- Общий декод на обе модели не делался: DOVER нужен полный кадр, Qwen — уже уменьшенный.
-
-### Низкое влияние
-
-Не делалось:
-
-- формат JSON/CSV и прочий Python вокруг записи результатов;
-- `torch.compile` для VLM;
-- квантизация Qwen в 4/8 bit: 2B на A100 и так маленький, а текст описания от этого страдает;
-- ONNX и TensorRT для DOVER: forward этой сети — единицы гигабайт и доля секунды, основное время DOVER сидит в CPU-decode.
-
-### Одна A100 и кластер
-
-На одной A100 не ускоряют конец пайплайна:
-
-- speculative decoding;
-- NVDEC вместо CPU-decode, пока ролики короткие;
-- вторая карта: DOVER на одной, Qwen на другой.
-
-8B и FP8 сюда не подходят. У A100 нет FP8-ядер, а Qwen3-VL-8B в несколько раз дороже 2B на prefill тех же кадров. `--max-model-len 32768` и `--kv-cache-dtype fp8_e5m2` для этого промпта почти ничего не дают: KV и так маленький.
-
-Флаги, с которыми пайплайн поднимает сервер в параллельном режиме:
-
-```bash
-vllm serve Qwen/Qwen3-VL-2B-Instruct \
-  --dtype bfloat16 \
-  --max-model-len 4096 \
-  --max-num-seqs 32 \
-  --gpu-memory-utilization 0.50 \
-  --limit-mm-per-prompt.image 8 \
-  --limit-mm-per-prompt.video 0 \
-  --mm-processor-kwargs '{"min_pixels": 4096, "max_pixels": 147456}' \
-  --mm-processor-cache-gb 0 \
-  --trust-remote-code \
-  --host 127.0.0.1 \
-  --port 8000
-```
-
-`max_pixels` равен `max_side²`. Без него vLLM на старте профилирует кадр дефолтного размера Qwen и падает в `Engine core initialization failed` ещё до `/health`.
-
-На батче 16 к моменту OOM у DOVER уже занято 23 ГБ живых тензоров и ещё 10 ГБ сидит в кэше аллокатора. Следующий блок forward просит 10.6 ГБ. Веса DOVER — 229 МБ, в этих 23 ГБ их почти нет. Пик тензоров около 34 ГБ, а вместе с фрагментами процесс хочет ~44 ГБ. Половина карты под vLLM столько не оставляет, поэтому в конфиге батч DOVER — 8.
-
-## Ablation
-
-```bash
-python -m video_processing --input video --output results --ablate
-```
-
-Три точки Qwen: 4 кадра / сторона 256, 8 / 384, 16 / 384. Батчи Qwen и DOVER: 8 и 10. Батч 16 запускается только если 10 быстрее 8 хотя бы на 5% по видео/с. Выбранные батч и точка `8×384` записываются в `configs/default.yaml`. Сводка — `results/ABLATION.md`.
-
-Ablation гоняет стадии по отдельности и переиспользует уже посчитанный DOVER. Совместный режим `parallel: true` измеряет обычный прогон, не таблица ablation.
+| Поле | Смысл |
+|---|---|
+| `videos_per_sec` | Установившийся режим: после `warmup_videos` и только пока заняты обе стадии. Если `note` начинается с «ВНИМАНИЕ», окно короче прогрева, и вместо него взято значение с хвостом. Поднимите `replicate`. |
+| `videos_per_sec_with_tail` | То же, но с хвостом, когда одна стадия уже закончила |
+| `makespan_sec`, `dover_end_sec`, `qwen_end_sec` | Общее время прогона и момент окончания каждой стадии, без загрузки моделей. Кто кончил последним — то и узкое место. |
+| `load_sec` | Загрузка vLLM и DOVER |
+| `captions_truncated_jobs`, `captions_looped_jobs` | Подписи, обрезанные по `max_tokens` и зациклившиеся (доля уникальных 8-грамм меньше 90%) |
+| `qwen_prep_sec_mean`, `qwen_request_sec_mean` | В непрерывном режиме: подготовка кадров и запрос на один ролик |
 
 ## Конфиг
 
-`configs/default.yaml`:
+`configs/default.yaml` — итог серии замеров. У ключей с замером в комментарии указан прогон, на котором значение выбрано.
 
-| Ключ | Смысл |
+| Ключ | Значение | Смысл |
+|---|---|---|
+| `replicate`, `warmup_videos` | 16, 4 | Копий набора и сколько первых роликов не входит в видео/с |
+| `parallel` | `true` | DOVER и Qwen одновременно, vLLM на 50% VRAM |
+| `dover.decoder` | `nvdec` | `cpu` — ffmpeg и нарезка в Python |
+| `dover.batch_size`, `dover.decode_workers` | 8, 8 | Роликов в forward и одновременно готовящихся роликов |
+| `qwen.system_prompt` | краткость и запрет выдумок | Пусто — без системного сообщения |
+| `qwen.num_frames`, `qwen.max_side` | 8, 384 | Визуальный бюджет: главный рычаг «качество против скорости» |
+| `qwen.input` | `images` | `video` — те же кадры одним роликом. Хуже по фактам (results_v7, results_v9) |
+| `qwen.decoder` | `nvdec` | `cpu` — ffmpeg |
+| `qwen.continuous`, `qwen.max_num_seqs` | `true`, 64 | Непрерывная подача и предел одновременных запросов в vLLM |
+| `qwen.decode_workers` | 8 | Одновременно готовящихся роликов |
+| `qwen.max_tokens` | 1536 | Страховка от обрезания, длину задаёт системное сообщение |
+| `qwen.temperature`, `repetition_penalty`, `presence_penalty`, `seed` | 0.3, 1.1, 0.0, 42 | Сэмплинг. Seed не даёт побайтной воспроизводимости: результат vLLM зависит от состава батча |
+| `qwen.backend` | `vllm` | `transformers` — запасной путь без режима видео |
+| `qwen.max_model_len` | 4096 | 8 кадров — около 850 токенов промпта плюс ответ |
+| `cpu_threads` | 0 | Потоки torch и OpenCV. 2 замедлили DOVER (results_v4) |
+
+С этими флагами пайплайн поднимает vLLM в параллельном режиме:
+
+```bash
+vllm serve Qwen/Qwen3-VL-2B-Instruct \
+  --dtype bfloat16 --max-model-len 4096 --max-num-seqs 64 \
+  --gpu-memory-utilization 0.50 \
+  --limit-mm-per-prompt.image 8 --limit-mm-per-prompt.video 0 \
+  --mm-processor-kwargs '{"min_pixels": 4096, "max_pixels": 147456}' \
+  --mm-processor-cache-gb 0 --no-enable-prefix-caching \
+  --trust-remote-code --host 127.0.0.1 --port 8000
+```
+
+- `max_pixels = max_side²`. Без него vLLM на старте профилирует кадр дефолтного размера Qwen и падает ещё до `/health`. В режиме видео бюджет умножается на `num_frames`, потому что для видео это бюджет на все кадры.
+- Prefix caching выключен: копии одного ролика побайтно совпадают, и кэш завысил бы скорость.
+
+## Скрипты
+
+| Скрипт | Зачем |
 |---|---|
-| `parallel` | `true` — DOVER и Qwen одновременно, vLLM на 50%. `false` — сначала весь DOVER, потом Qwen. |
-| `replicate` | Сколько копий набора прогнать ради стабильной скорости. |
-| `warmup_videos` | Сколько первых роликов не входит в видео/с. |
-| `dover.batch_size` | Роликов в одном forward DOVER. |
-| `qwen.num_frames`, `qwen.max_side` | Главный рычаг качества описания против скорости. |
-| `qwen.batch_size`, `qwen.max_num_seqs` | Сколько роликов Qwen держит одновременно. Имеет смысл поднимать парой. |
-| `qwen.max_model_len` | Потолок контекста vLLM. Для 8 кадров хватает 4096. |
-| `qwen.backend` | `vllm` или `transformers`. |
-| `qwen.gpu_memory_utilization` | Доля VRAM в последовательном режиме. В параллельном пайплайн подставляет 0.50. |
+| `scripts/run_series.sh name config [name config …]` | Прогоны по очереди, у каждого свои `logs/vmstat_*.txt`, `logs/*_stderr.txt` и лог vLLM. В конце — сравнение с `BASE` (по умолчанию `results_v8`) |
+| `scripts/compare_runs.py results_a results_b …` | Скорость и качество подписей нескольких прогонов рядом |
+| `scripts/dover_parity.py [--decoder nvdec] [--demo]` | Входы и оценки DOVER против официального кода, `--demo` — против z-оценок из README DOVER |
+| `scripts/dover_decode_bench.py` | Только подготовка DOVER: CPU против NVDEC, 1 и 8 потоков |
+| `python -m video_processing --ablate` | Старый подбор батчей и визуального бюджета, стадии гоняются по отдельности. Сводка — `results/ABLATION.md` |
+
+Конфиги `configs/v8_*.yaml`–`v11_*.yaml` и `final_r64.yaml` — точные настройки прогонов из [REPORT.md](REPORT.md), каждый отличается от предыдущего одним изменением. `ab_*.yaml` — ранний A/B штрафов за повторы на тогдашнем конфиге.
