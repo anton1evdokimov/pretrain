@@ -171,7 +171,10 @@ class VllmCaptioner:
             "max_tokens": self.cfg.max_tokens,
             "temperature": self.cfg.temperature,
             "repetition_penalty": self.cfg.repetition_penalty,
+            "presence_penalty": self.cfg.presence_penalty,
         }
+        if self.cfg.seed is not None:
+            payload["seed"] = self.cfg.seed
         return _post_chat(self.api_base, payload)
 
     # [17] Процесс vLLM. Семплер flashinfer выключен, воркеры через spawn.

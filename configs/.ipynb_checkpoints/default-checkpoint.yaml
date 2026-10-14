@@ -1,6 +1,6 @@
 input_dir: video
 output_dir: results
-replicate: 8
+replicate: 16
 warmup_videos: 4
 seed: 42
 # DOVER и Qwen одновременно: vLLM берёт 50% VRAM, DOVER живёт в остатке.
