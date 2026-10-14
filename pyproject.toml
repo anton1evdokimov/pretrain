@@ -22,6 +22,8 @@ dependencies = [
 [project.optional-dependencies]
 flash = ["flash-attn"]
 vllm = ["vllm>=0.11.0"]
+# dover.decoder / qwen.decoder: nvdec. Колесо должно совпадать с CUDA-сборкой torch.
+nvdec = ["torchcodec"]
 
 [project.scripts]
 video-processing = "video_processing.cli:main"
