@@ -1,0 +1,29 @@
+{
+  "device": "cuda",
+  "gpu": "NVIDIA A100 80GB PCIe",
+  "attn_implementation": "vllm",
+  "overlapped": true,
+  "unique_videos": 10,
+  "processed_jobs": 160,
+  "warmup_videos": 4,
+  "stable_samples": 128,
+  "dover_sec_per_video": 0.1926,
+  "qwen_sec_per_video": 0.1469,
+  "pipeline_sec_per_video": 0.473,
+  "videos_per_sec": 2.114101,
+  "videos_per_hour": 7610.76,
+  "dover_stage_sec": 31.849,
+  "qwen_stage_sec": 80.71,
+  "steady_window_sec": 0.0,
+  "videos_per_sec_with_tail": 2.114101,
+  "makespan_sec": 80.711,
+  "dover_end_sec": 31.848,
+  "qwen_end_sec": 80.711,
+  "load_sec": {
+    "qwen": 50.84,
+    "dover": 1.58
+  },
+  "captions_truncated_jobs": 1,
+  "note": "ВНИМАНИЕ: окно, где заняты оба потока, короче прогрева; число включает хвост одной стадии и завышено. Поднимите replicate",
+  "captions_looped_jobs": 5
+}
