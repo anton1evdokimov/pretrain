@@ -17,8 +17,9 @@ dover:
   # Непрерывный пул ffmpeg по одному потоку. 16 оказалось медленнее 8 (results_v4).
   decode_workers: 8
   # cpu — ffmpeg → numpy → нарезка в Python. nvdec — torchcodec на GPU, виды
-  # собираются тензорно; при ошибке ролик уходит в cpu. Паритет: scripts/dover_parity.py.
-  decoder: cpu
+  # собираются тензорно; при ошибке ролик уходит в cpu. Паритет: scripts/dover_parity.py
+  # (±2 уровня на входе, overall ≤ 0.013). Этап DOVER 242 → 34 с (results_v6).
+  decoder: nvdec
 
 qwen:
   model_id: Qwen/Qwen3-VL-2B-Instruct
@@ -38,8 +39,13 @@ qwen:
   # logits по-разному при разном составе батча, и при temperature > 0 текст расходится
   # (v3 и v5 совпадают на первых ~100 словах 1.mp4). Сравнивать по caption_stats.
   seed: 42
-  # images — 8 отдельных картинок. video — те же кадры одним роликом с метками времени.
+  # images — 8 отдельных картинок. video — те же кадры одним роликом с метками времени:
+  # без перечисления «Кадр N», но в 2–4 раза короче и с выдуманным текстом на 8 кадрах,
+  # соседние кадры склеиваются попарно (results_v7).
   input: images
+  # Кадры Qwen: cpu — ffmpeg, nvdec — torchcodec на GPU. С NVDEC у DOVER этап Qwen
+  # половину времени ждёт кадры от ffmpeg (results_v6: 43 с из 85).
+  decoder: cpu
   # Роликов пачки, которые готовятся к Qwen параллельно. 1 — по одному, как раньше.
   # 8 сократили этап Qwen с 217 до 136 с (results_v4).
   decode_workers: 8

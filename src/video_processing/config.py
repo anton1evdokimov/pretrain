@@ -32,6 +32,7 @@ class QwenConfig:
     seed: int | None = None
     decode_workers: int = 1
     input: str = "images"
+    decoder: str = "cpu"
     batch_size: int = 8
     attn_implementation: str = "auto"
     backend: str = "vllm"
@@ -103,6 +104,7 @@ def load_config(path: str | Path | None) -> AppConfig:
             seed=int(qwen_raw.get("seed", raw.get("seed", 42))),
             decode_workers=int(qwen_raw.get("decode_workers", 1)),
             input=str(qwen_raw.get("input", "images")),
+            decoder=str(qwen_raw.get("decoder", "cpu")),
             batch_size=int(qwen_raw.get("batch_size", 8)),
             attn_implementation=str(qwen_raw.get("attn_implementation", "auto")),
             backend=str(qwen_raw.get("backend", "vllm")),

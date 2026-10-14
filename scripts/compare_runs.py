@@ -58,10 +58,16 @@ def main() -> None:
     width = max(len(n) for n in names) + 2 if names else 10
 
     print("\n" + "metric".ljust(26) + "".join(n.rjust(width) for n in names))
-    for key, default in (("dover_decoder", "cpu"), ("qwen_input", "images")):
+    for key, default in (("dover_decoder", "cpu"), ("qwen_decoder", "cpu"), ("qwen_input", "images")):
         print(key.ljust(26) + "".join(str(runs[n]["config"].get(key, default)).rjust(width) for n in names))
     for key in THROUGHPUT:
         print(key.ljust(26) + "".join(str(runs[n]["throughput"].get(key, "—")).rjust(width) for n in names))
+    # Остаток этапа Qwen сверх вызовов vLLM — ожидание кадров и первая пачка.
+    for label, fn in (
+        ("qwen_vllm_calls_sec", lambda t: t["qwen_sec_per_video"] * (t["processed_jobs"] - t["warmup_videos"])),
+        ("qwen_waiting_sec", lambda t: t["qwen_stage_sec"] - t["qwen_sec_per_video"] * (t["processed_jobs"] - t["warmup_videos"])),
+    ):
+        print(label.ljust(26) + "".join(f"{fn(runs[n]['throughput']):.1f}".rjust(width) for n in names))
 
     stats = {n: _stats(runs[n]) for n in names}
     videos = sorted({v for s in stats.values() for v in s}, key=lambda v: int(Path(v).stem) if Path(v).stem.isdigit() else v)

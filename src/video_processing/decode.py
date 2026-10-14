@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -99,6 +100,41 @@ def sample_rgb_frames(
     except Exception:
         captured = {}
     return _sample_rgb_frames_opencv(path, needed, max_side)
+
+
+# [46n] Кадры Qwen через NVDEC (torchcodec). Resize тот же cv2 [47], что у ffmpeg-пути.
+def sample_rgb_frames_nvdec(
+    path: Path, indices: np.ndarray, max_side: int | None = None
+) -> dict[int, np.ndarray]:
+    from torchcodec.decoders import VideoDecoder
+
+    ordered = sorted({int(i) for i in indices.tolist()})
+    if not ordered:
+        return {}
+    decoder = VideoDecoder(str(path), device="cuda", seek_mode="exact")
+    last = int(decoder.metadata.num_frames or 1) - 1
+    batch = decoder.get_frames_at(indices=[min(idx, last) for idx in ordered]).data
+    frames = batch.permute(0, 2, 3, 1).contiguous().cpu().numpy()
+    return {
+        idx: _resize_rgb(rgb, max_side) if max_side is not None else rgb
+        for idx, rgb in zip(ordered, frames)
+    }
+
+
+# [44d] Выбор декодера кадров Qwen. При ошибке NVDEC ролик идёт через ffmpeg [46].
+def sample_qwen_frames(
+    path: Path,
+    indices: np.ndarray,
+    max_side: int | None,
+    ffmpeg_threads: int,
+    decoder: str,
+) -> dict[int, np.ndarray]:
+    if decoder == "nvdec":
+        try:
+            return sample_rgb_frames_nvdec(path, indices, max_side)
+        except Exception as exc:
+            print(f"[qwen] NVDEC: {path.name} → cpu ({exc})", file=sys.stderr)
+    return sample_rgb_frames(path, indices, max_side=max_side, ffmpeg_threads=ffmpeg_threads)
 
 
 # [46a] Запасной путь: последовательный OpenCV, если ffmpeg не отдал кадр.

@@ -25,7 +25,7 @@ from pathlib import Path
 from PIL import Image
 
 from video_processing.config import ROOT, QwenConfig
-from video_processing.decode import frames_as_pil, probe_video, sample_rgb_frames, uniform_indices
+from video_processing.decode import frames_as_pil, probe_video, sample_qwen_frames, uniform_indices
 from video_processing.device import pick_torch_device
 
 
@@ -147,8 +147,8 @@ class VllmCaptioner:
         meta = probe_video(path)
         indices = uniform_indices(meta["nb_frames"], self.cfg.num_frames)
         threads = 1 if self.cfg.decode_workers > 1 else 0
-        captured = sample_rgb_frames(
-            path, indices, max_side=self.cfg.max_side, ffmpeg_threads=threads
+        captured = sample_qwen_frames(
+            path, indices, self.cfg.max_side, threads, self.cfg.decoder
         )
         return frames_as_pil(captured, indices)
 

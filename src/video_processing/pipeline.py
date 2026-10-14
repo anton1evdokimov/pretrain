@@ -311,6 +311,7 @@ def run_pipeline(
         "captions_all": caption_records,
         "config": {
             "qwen_input": cfg.qwen.input,
+            "qwen_decoder": cfg.qwen.decoder,
             "dover_decoder": cfg.dover.decoder,
             "replicate": cfg.replicate,
             "warmup_videos": cfg.warmup_videos,
