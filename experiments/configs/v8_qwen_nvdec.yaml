@@ -1,6 +1,6 @@
-# v9: v8 + qwen.input: video, 16 кадров — тот же бюджет токенов, что у 8 картинок. Сравнивать с results_v8.
+# v8: default (DOVER nvdec) + qwen.decoder: nvdec. Сравнивать с results_v6 (кадры Qwen на NVDEC).
 input_dir: video
-output_dir: results_v9
+output_dir: experiments/results_v8
 replicate: 16
 warmup_videos: 4
 seed: 42
@@ -25,7 +25,7 @@ dover:
 qwen:
   model_id: Qwen/Qwen3-VL-2B-Instruct
   prompt: "Сгенерируй детальное описание всего, что происходит на видео"
-  num_frames: 16
+  num_frames: 8
   max_side: 384
   # 512 обрезал 9 из 10 описаний, 1024 — 6 из 8 копий 3.mp4 (430 слов, без повторов).
   # 8×384 — ~750 токенов промпта, с 1536 новыми влезает в max_model_len 4096.
@@ -43,11 +43,11 @@ qwen:
   # images — 8 отдельных картинок. video — те же кадры одним роликом с метками времени:
   # без перечисления «Кадр N», но в 2–4 раза короче и с выдуманным текстом на 8 кадрах,
   # соседние кадры склеиваются попарно (results_v7).
-  input: video
+  input: images
   # Кадры Qwen: cpu — ffmpeg, nvdec — torchcodec на GPU. С NVDEC у DOVER этап Qwen
   # половину времени ждёт кадры от ffmpeg (results_v6: 43 с из 85).
   decoder: nvdec
-  # Роликов пачки, которые готовятся к Qwen параллельно. 1 — по одному, как раньше.
+  # Роликов пачки, которые готовятся к Qwen параллельно. 1 — по одному.
   # 8 сократили этап Qwen с 217 до 136 с (results_v4).
   decode_workers: 8
   batch_size: 32

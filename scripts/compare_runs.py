@@ -1,6 +1,6 @@
 """Side-by-side throughput and caption quality of several results_* dirs.
 
-    python scripts/compare_runs.py results_v5 results_v6 results_v7
+    python scripts/compare_runs.py experiments/results_v10 experiments/results_v11 results_final
 """
 
 from __future__ import annotations

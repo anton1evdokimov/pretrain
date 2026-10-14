@@ -15,20 +15,28 @@ from tqdm import tqdm
 from video_processing.config import AppConfig
 from video_processing.decode import probe_video
 from video_processing.device import gpu_name, release_memory, sync
-from video_processing.dover_infer import DoverScorer
+from video_processing.dover_infer import DoverScorer, dover_z
 from video_processing.qwen_infer import QwenCaptioner, make_captioner
 
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 
-# Порядок основного прогона. Номер стоит над функцией.
-# 1 main → 2 load_config → 4 configure_cuda → 5 run_pipeline
-# 6 list_videos → 7 expand → 8 DoverScorer → 10 make_captioner → 13 _run_overlapped
-# 14 _load_qwen → 15..18 vLLM → 19..24 загрузка DOVER
+# Порядок основного прогона с configs/default.yaml (parallel, vLLM, NVDEC, continuous).
+# Номер стоит над функцией.
+# 1 main → 2 load_config (3 _as_path) → 4 configure_cuda → 5 run_pipeline
+# 6 list_videos → 7 expand → 8 DoverScorer (9 устройство) → 10 make_captioner → 11 VllmCaptioner
+# → 12 gpu_name → 13 _run_overlapped
+# 14 _load_qwen → 15 load → 16 _spawn (17 команда) → 18 /health → 19..24 загрузка DOVER
 # дальше одновременно:
-#   25d produce → 27s iter_scores → 28p prepare (пул) → 34 ffmpeg → 37f на GPU → 40 fuse
-#   25q consume → 44 кадры → 49 caption_batch → 52 POST
-# 53–54 unload → 55 скорость → 57 запись → 59 release_memory
+#   25d produce → 27s iter_scores → 28p prepare (пул) → 28n stream → 28g NVDEC: 29 ffprobe,
+#       30..31 индексы, 32..32g окна, 36g gather → 37 нормализация → 37f forward → 38 sync
+#       → 39 среднее по клипам → 40 fuse → 41 отметка
+#   25c consume_continuous → 44 кадры: 29, 45, 44d → 46n NVDEC → 47 resize → 48 PIL
+#       → 49c → 50 → 51 JPEG → 52 POST → 52r запись подписи → 41 отметка
+# 42 окно замера → 53–54 unload → 55 скорость (56 среднее) → 56s статистика подписей
+# → 57 запись → 58 RESULTS.md → 59 release_memory
+# Без qwen.continuous вместо 25c идёт 25q: 26 _chunks → 43 → 44 → 49 → 50 …
+# С decoder: cpu или при ошибке NVDEC вместо 28n/28g идёт 28 (33–35, 36t, 36a), вместо 46n — 46.
 
 
 @dataclass
@@ -65,16 +73,16 @@ def expand_for_throughput(videos: list[Path], replicate: int) -> list[tuple[int,
     return [(copy, path) for copy in range(replicate) for path in videos]
 
 
-# [26] Режет список джобов на батчи DOVER и, отдельно, Qwen.
+# [26] Режет список джобов на пачки Qwen для [25q] и последовательного режима.
+# DOVER собирает пачки сам в [27s].
 def _chunks(items: list, size: int):
     size = max(1, size)
     for start in range(0, len(items), size):
         yield items[start : start + size]
 
 
-# vLLM process reserves this slice; DOVER allocates in the parent from the rest.
-# 2B bf16 does not need 70%. At batch 16 the DOVER forward asks for ~11 GiB
-
+# Доля VRAM процесса vLLM; DOVER берёт остаток в родительском процессе.
+# 2B в bf16 хватает половины, а forward DOVER на batch 16 просит ~11 GiB одним блоком.
 OVERLAP_VLLM_FRACTION = 0.50
 
 # Доля уникальных 8-грамм слов ниже этого порога — описание зациклилось.
@@ -87,7 +95,7 @@ def _uniq8(text: str) -> float:
     return len(set(grams)) / len(grams) if grams else 1.0
 
 
-# [42c] Одна подпись любого джоба, не только копии 0: качество меряется по всем копиям.
+# [52r] Одна подпись любого джоба, не только копии 0: качество меряется по всем копиям.
 def _caption_record(index: int, copy: int, path: Path, text: str, finish: str, tokens: int) -> dict:
     return {
         "job": index,
@@ -101,7 +109,7 @@ def _caption_record(index: int, copy: int, path: Path, text: str, finish: str, t
     }
 
 
-# [42s] По каждому ролику: сколько копий обрезано и зациклилось, средняя длина.
+# [56s] По каждому ролику: сколько копий обрезано и зациклилось, средняя длина.
 def _caption_stats(records: list[dict], videos: list[Path]) -> dict:
     stats = {}
     for path in videos:
@@ -142,15 +150,7 @@ def _steady_window(events: list[tuple[float, int]], warmup: int, end: float | No
 
 
 # [5] Основной прогон. При parallel зовёт [13], иначе стадии по очереди.
-def run_pipeline(
-    cfg: AppConfig,
-    *,
-    write_outputs: bool = True,
-    skip_qwen: bool = False,
-    cached_dover_scores: dict | None = None,
-    cached_dover_times: list[float] | None = None,
-    cached_dover_stage_sec: float | None = None,
-) -> dict:
+def run_pipeline(cfg: AppConfig, *, write_outputs: bool = True) -> dict:
     videos = list_videos(cfg.input_dir)
     jobs = expand_for_throughput(videos, cfg.replicate)
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
@@ -162,8 +162,7 @@ def run_pipeline(
         f"device={dover.device} gpu={gpu_name()} videos={len(videos)} "
         f"replicate={cfg.replicate} dover_bs={cfg.dover.batch_size} "
         f"qwen_backend={cfg.qwen.backend} qwen_bs={cfg.qwen.batch_size} "
-        f"parallel={cfg.parallel and not skip_qwen and cached_dover_scores is None} "
-        f"skip_qwen={skip_qwen} reuse_dover={cached_dover_scores is not None}"
+        f"parallel={cfg.parallel}"
     )
 
     overlapped = False
@@ -171,7 +170,7 @@ def run_pipeline(
     load_sec: dict[str, float] = {}
     qwen_truncated = 0
     caption_records: list[dict] = []
-    if cfg.parallel and not skip_qwen and cached_dover_scores is None:
+    if cfg.parallel:
         overlapped = True
         bundle = _run_overlapped(cfg, dover, qwen, jobs)
         dover_scores = bundle["dover_scores"]
@@ -184,10 +183,6 @@ def run_pipeline(
         overlap_info = bundle["overlap"]
         load_sec = bundle["load_sec"]
         caption_records = bundle["caption_records"]
-    elif cached_dover_scores is not None:
-        dover_scores = cached_dover_scores
-        dover_times = list(cached_dover_times or [])
-        dover_stage_sec = float(cached_dover_stage_sec or 0.0)
     else:
         t_load = time.perf_counter()
         dover.load()
@@ -216,74 +211,54 @@ def run_pipeline(
     if not overlapped:
         unique_results = {}
         qwen_times = []
-        qwen_stage_sec = 0.0
-        if skip_qwen:
-            for path in videos:
-                scores = dover_scores[path.name]
-                meta = probe_video(path)
-                unique_results[path.name] = VideoResult(
-                    video_id=path.stem,
-                    source=str(path.relative_to(cfg.input_dir)),
-                    duration_sec=round(meta["duration"], 3),
-                    width=meta["width"],
-                    height=meta["height"],
-                    technical=round(scores["technical"], 4),
-                    aesthetic=round(scores["aesthetic"], 4),
-                    overall=round(scores["overall"], 4),
-                    caption="",
-                    caption_finish_reason="",
-                    dover_sec=round(scores["elapsed"], 3),
-                    qwen_sec=0.0,
-                )
-        else:
-            print(f"Qwen model={cfg.qwen.model_id} backend={cfg.qwen.backend}")
-            n_done = 0
-            prefetch = ThreadPoolExecutor(max_workers=2)
-            job_batches = list(_chunks(jobs, cfg.qwen.batch_size))
-            next_frames = prefetch.submit(_prepare_batch, qwen, job_batches[0]) if job_batches else None
-            try:
-                t_load = time.perf_counter()
-                qwen.load()
-                load_sec["qwen"] = time.perf_counter() - t_load
-                qwen_t0 = time.perf_counter()
-                for i, batch in enumerate(tqdm(job_batches, desc="Qwen3-VL")):
-                    prepared = next_frames.result()
-                    if i + 1 < len(job_batches):
-                        next_frames = prefetch.submit(_prepare_batch, qwen, job_batches[i + 1])
-                    t0 = time.perf_counter()
-                    texts = qwen.caption_batch(prepared)
-                    sync(qwen.device)
-                    elapsed = time.perf_counter() - t0
-                    per_item = elapsed / max(len(batch), 1)
-                    for (copy, path), (text, finish, tokens) in zip(batch, texts):
-                        if n_done >= cfg.warmup_videos:
-                            qwen_times.append(per_item)
-                        qwen_truncated += finish == "length"
-                        caption_records.append(
-                            _caption_record(n_done, copy, path, text, finish, tokens)
+        print(f"Qwen model={cfg.qwen.model_id} backend={cfg.qwen.backend}")
+        n_done = 0
+        prefetch = ThreadPoolExecutor(max_workers=2)
+        job_batches = list(_chunks(jobs, cfg.qwen.batch_size))
+        next_frames = prefetch.submit(_prepare_batch, qwen, job_batches[0]) if job_batches else None
+        try:
+            t_load = time.perf_counter()
+            qwen.load()
+            load_sec["qwen"] = time.perf_counter() - t_load
+            qwen_t0 = time.perf_counter()
+            for i, batch in enumerate(tqdm(job_batches, desc="Qwen3-VL")):
+                prepared = next_frames.result()
+                if i + 1 < len(job_batches):
+                    next_frames = prefetch.submit(_prepare_batch, qwen, job_batches[i + 1])
+                t0 = time.perf_counter()
+                texts = qwen.caption_batch(prepared)
+                sync(qwen.device)
+                elapsed = time.perf_counter() - t0
+                per_item = elapsed / max(len(batch), 1)
+                for (copy, path), (text, finish, tokens) in zip(batch, texts):
+                    if n_done >= cfg.warmup_videos:
+                        qwen_times.append(per_item)
+                    qwen_truncated += finish == "length"
+                    caption_records.append(
+                        _caption_record(n_done, copy, path, text, finish, tokens)
+                    )
+                    if copy == 0 and path.name not in unique_results:
+                        meta = probe_video(path)
+                        scores = dover_scores[path.name]
+                        unique_results[path.name] = VideoResult(
+                            video_id=path.stem,
+                            source=str(path.relative_to(cfg.input_dir)),
+                            duration_sec=round(meta["duration"], 3),
+                            width=meta["width"],
+                            height=meta["height"],
+                            technical=round(scores["technical"], 4),
+                            aesthetic=round(scores["aesthetic"], 4),
+                            overall=round(scores["overall"], 4),
+                            caption=text,
+                            caption_finish_reason=finish,
+                            dover_sec=round(scores["elapsed"], 3),
+                            qwen_sec=round(per_item, 3),
                         )
-                        if copy == 0 and path.name not in unique_results:
-                            meta = probe_video(path)
-                            scores = dover_scores[path.name]
-                            unique_results[path.name] = VideoResult(
-                                video_id=path.stem,
-                                source=str(path.relative_to(cfg.input_dir)),
-                                duration_sec=round(meta["duration"], 3),
-                                width=meta["width"],
-                                height=meta["height"],
-                                technical=round(scores["technical"], 4),
-                                aesthetic=round(scores["aesthetic"], 4),
-                                overall=round(scores["overall"], 4),
-                                caption=text,
-                                caption_finish_reason=finish,
-                                dover_sec=round(scores["elapsed"], 3),
-                                qwen_sec=round(per_item, 3),
-                            )
-                        n_done += 1
-            finally:
-                prefetch.shutdown(wait=False)
-                qwen.unload()
-            qwen_stage_sec = time.perf_counter() - qwen_t0
+                    n_done += 1
+        finally:
+            prefetch.shutdown(wait=False)
+            qwen.unload()
+        qwen_stage_sec = time.perf_counter() - qwen_t0
 
     results = [unique_results[path.name] for path in videos]
     throughput = _throughput_stats(
@@ -299,7 +274,7 @@ def run_pipeline(
         overlapped=overlapped,
         overlap=overlap_info,
         load_sec=load_sec,
-        qwen_truncated=0 if skip_qwen else qwen_truncated,
+        qwen_truncated=qwen_truncated,
     )
     caption_stats = _caption_stats(caption_records, videos)
     if caption_records:
@@ -340,7 +315,8 @@ def run_pipeline(
     return payload
 
 
-# [13] Поднимает обе модели и с t=0 пускает [25d] и [25q] на одном списке роликов.
+# [13] Поднимает обе модели и с t=0 пускает [25d] и [25c] (без continuous — [25q])
+# на одном списке роликов.
 def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
     """Both models get the full job list from t=0.
 
@@ -404,7 +380,8 @@ def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
             bar.close()
             overlap["dover_stage_sec"] = time.perf_counter() - stage_t0
 
-    # [25q] Поток Qwen: кадры [43], затем подписи [49]. Идёт одновременно с [25d].
+    # [25q] Поток Qwen пачками: кадры [43], затем подписи [49]. Идёт вместо [25c],
+    # если qwen.continuous выключен или бэкенд не принимает параллельные запросы.
     def consume() -> None:
         prefetch = ThreadPoolExecutor(max_workers=2)
         job_batches = list(_chunks(jobs, cfg.qwen.batch_size))
@@ -585,7 +562,7 @@ def _load_qwen(qwen, cfg: AppConfig, *, overlapped: bool) -> None:
 
 
 # [43] Кадры следующего батча Qwen, пока текущий ещё считается. Зовёт [44].
-# qwen.decode_workers > 1 — ролики пачки декодируются параллельно, по одному потоку ffmpeg.
+# qwen.decode_workers > 1 — ролики пачки декодируются параллельно.
 def _prepare_batch(qwen: QwenCaptioner, batch: list[tuple[int, Path]]):
     paths = [path for _, path in batch]
     workers = max(1, min(int(qwen.cfg.decode_workers), len(paths)))
@@ -597,7 +574,7 @@ def _prepare_batch(qwen: QwenCaptioner, batch: list[tuple[int, Path]]):
     return list(zip(paths, frames))
 
 
-# [56] Среднее с/видео по замерам после warmup.
+# [56] Среднее, 0 для пустого списка. В [55] — с/видео по замерам после warmup.
 def _mean(values: list[float]) -> float:
     return float(statistics.mean(values)) if values else 0.0
 
@@ -681,7 +658,7 @@ def _throughput_stats(
     }
 
 
-# [57] results.json, results.csv, throughput.json и [58].
+# [57] results.json, results.csv, throughput.json, captions_all.jsonl и [58].
 def _write_outputs(output_dir: Path, payload: dict) -> None:
     (output_dir / "results.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -704,31 +681,50 @@ def _write_outputs(output_dir: Path, payload: dict) -> None:
     _write_markdown(output_dir / "RESULTS.md", payload)
 
 
-# [58] RESULTS.md: скорость и таблица десяти исходных роликов.
+# 2.mp4 перед 10.mp4.
+def _natural_key(name: str) -> tuple:
+    stem = Path(name).stem
+    return (0, int(stem), "") if stem.isdigit() else (1, 0, name)
+
+
+# [58] RESULTS.md: скорость, статистика подписей по всем копиям и таблица копии 0.
 def _write_markdown(path: Path, payload: dict) -> None:
     t = payload["throughput"]
     gpu = t.get("gpu") or t.get("device")
+    overlapped = bool(t.get("overlapped"))
     rows = [
         "# Результаты Video Processing",
         "",
         f"Устройство: **{gpu}**. Attention: `{t.get('attn_implementation')}`.",
         "",
-        "## Пропускная способность (после warmup)",
+        "## Пропускная способность",
         "",
-        f"- Режим: **{'DOVER ∥ Qwen' if t.get('overlapped') else 'последовательно'}**",
-        f"- Обработано джобов: **{t['processed_jobs']}** (уникальных видео: {t['unique_videos']}, replicate учтён)",
-        f"- Стабильных замеров: **{t['stable_samples']}**",
-        f"- DOVER: **{t['dover_sec_per_video']:.3f} с/видео**",
-        f"- Qwen3-VL: **{t['qwen_sec_per_video']:.3f} с/видео**",
-        f"- Пайплайн: **{t['pipeline_sec_per_video']:.3f} с/видео** → **{t['videos_per_sec']:.4f} видео/с** ({t['videos_per_hour']:.1f} видео/ч)",
-        f"- Описаний, обрезанных по max_tokens: **{t.get('captions_truncated_jobs', 0)}** из {t['processed_jobs']}",
+        f"- **{t['videos_per_sec']:.4f} видео/с** ({t['videos_per_hour']:.1f} видео/ч, "
+        f"{t['pipeline_sec_per_video']:.3f} с на ролик) в установившемся режиме",
+        f"- Режим: **{'DOVER и Qwen одновременно' if overlapped else 'сначала DOVER, потом Qwen'}**",
+        f"- Заданий: **{t['processed_jobs']}** ({t['unique_videos']} роликов × копии), "
+        f"прогрев — первые {t['warmup_videos']}, в замер вошло {t['stable_samples']}",
     ]
     if "steady_window_sec" in t:
         rows.append(
-            f"- Окно, где заняты оба потока: **{t['steady_window_sec']:.1f} с** "
-            f"(DOVER до {t['dover_end_sec']:.1f} с, Qwen до {t['qwen_end_sec']:.1f} с). "
-            f"С хвостом одной стадии было бы {t['videos_per_sec_with_tail']:.4f} видео/с"
+            f"- Окно замера, пока заняты обе стадии: **{t['steady_window_sec']:.1f} с** "
+            f"(DOVER закончил на {t['dover_end_sec']:.1f} с, Qwen на {t['qwen_end_sec']:.1f} с). "
+            f"С хвостом одной стадии — {t['videos_per_sec_with_tail']:.4f} видео/с"
         )
+    if overlapped:
+        rows.append(
+            f"- Интервал между готовыми роликами: DOVER {t['dover_sec_per_video']:.3f} с, "
+            f"Qwen3-VL {t['qwen_sec_per_video']:.3f} с. Это темп стадии, а не время одного "
+            "ролика: стадия ведёт несколько роликов одновременно"
+        )
+    else:
+        rows.append(
+            f"- На ролик: DOVER {t['dover_sec_per_video']:.3f} с, Qwen3-VL {t['qwen_sec_per_video']:.3f} с"
+        )
+    rows.append(
+        f"- Описаний, обрезанных по max_tokens: **{t.get('captions_truncated_jobs', 0)}** "
+        f"из {t['processed_jobs']}"
+    )
     stats = payload.get("caption_stats") or {}
     if stats:
         rows += [
@@ -738,7 +734,7 @@ def _write_markdown(path: Path, payload: dict) -> None:
             "| Видео | Копий | Обрезано | Зациклено | Слов в среднем | Уник. 8-грамм | Токенов промпта |",
             "|---|---:|---:|---:|---:|---:|---:|",
         ]
-        for name, s in stats.items():
+        for name, s in sorted(stats.items(), key=lambda kv: _natural_key(kv[0])):
             rows.append(
                 f"| {name} | {s['jobs']} | {s['truncated']} | {s['looped']} | "
                 f"{s['words_mean']:.0f} | {s['uniq8_mean']:.0%} | {s['prompt_tokens']:.0f} |"
@@ -747,13 +743,24 @@ def _write_markdown(path: Path, payload: dict) -> None:
         "",
         "## Оценки и описания (копия 0)",
         "",
-        "| Видео | Technical | Aesthetic | Overall | Описание |",
-        "|---|---:|---:|---:|---|",
+        "Technical, aesthetic и overall — сигмоида от z относительно калибровки DOVER, "
+        "как в официальном коде. При |z| больше 3 шкала `[0, 1]` насыщается, и ролики "
+        "различаются только по z.",
+        "",
+        "| Видео | Technical | Aesthetic | Overall | Technical z | Aesthetic z | Описание |",
+        "|---|---:|---:|---:|---:|---:|---|",
     ]
-    for item in payload["results"]:
+    raw = payload.get("dover_scores") or {}
+    for item in sorted(payload["results"], key=lambda r: _natural_key(r["video_id"])):
         caption = item["caption"].replace("|", "\\|")
+        scores = raw.get(Path(item["source"]).name) or {}
+        if "aesthetic_raw" in scores:
+            aes_z, tech_z = dover_z(scores["aesthetic_raw"], scores["technical_raw"])
+            z_cells = f"{tech_z:+.2f} | {aes_z:+.2f}"
+        else:
+            z_cells = "— | —"
         rows.append(
             f"| {item['video_id']} | {item['technical']:.4f} | {item['aesthetic']:.4f} | "
-            f"{item['overall']:.4f} | {caption} |"
+            f"{item['overall']:.4f} | {z_cells} | {caption} |"
         )
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")

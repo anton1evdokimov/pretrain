@@ -29,14 +29,9 @@ from video_processing.decode import frames_as_pil, probe_video, sample_qwen_fram
 from video_processing.device import pick_torch_device
 
 
-# [16] Команда vllm serve: bf16, контекст 4096, max_pixels = max_side².
+# [17] Команда vllm serve для [16]: dtype и контекст из конфига (bf16, 4096),
+# max_pixels = max_side², у input: video — ещё × num_frames.
 def vllm_serve_command(cfg: QwenConfig, gpu_memory_utilization: float | None = None) -> list[str]:
-    """Flags for one A100 and this caption workload.
-
-    8 frames at 384px plus 256 new tokens fit in ~2k tokens, so the context
-    cap is 4096. A 32k cap only reserves KV cache. FP8 and an 8B checkpoint
-    are left out: A100 has no FP8 tensor cores, and 8B multiplies the prefill.
-    """
     seqs = max(int(cfg.max_num_seqs), int(cfg.batch_size), 1)
     util = cfg.gpu_memory_utilization if gpu_memory_utilization is None else gpu_memory_utilization
     # Startup profiles the vision encoder at processor max_pixels. Qwen's
@@ -103,7 +98,7 @@ class VllmCaptioner:
             return self.cfg.api_base.rstrip("/")
         return f"http://127.0.0.1:{self.cfg.port}"
 
-    # [15] Спавнит сервер [17] и ждёт /health [18].
+    # [15] Спавнит сервер [16] и ждёт /health [18].
     def load(self, gpu_memory_utilization: float | None = None) -> None:
         self._mem_util = gpu_memory_utilization
         if self.device != "cuda":
@@ -142,7 +137,7 @@ class VllmCaptioner:
             self._log.close()
             self._log = None
 
-    # [44] 8 кадров ролика: [29], [45], [46], [48].
+    # [44] 8 кадров ролика: [29], [45], декодер [44d], [48].
     def prepare_frames(self, path: Path) -> list[Image.Image]:
         meta = probe_video(path)
         indices = uniform_indices(meta["nb_frames"], self.cfg.num_frames)
@@ -152,7 +147,7 @@ class VllmCaptioner:
         )
         return frames_as_pil(captured, indices)
 
-    # Один ролик через [49]. Поток Qwen зовёт [49] пачкой.
+    # Один ролик через [49]. Основной прогон идёт через [49c], а [25q] — через [49].
     def caption(self, path: Path, frames: list[Image.Image] | None = None) -> str:
         images = frames if frames is not None else self.prepare_frames(path)
         return self.caption_batch([(path, images)])[0][0]
@@ -172,7 +167,7 @@ class VllmCaptioner:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(self._caption_one, items))
 
-    # [50] JPEG кадров [51] и POST [52]. temperature и repetition_penalty отсюда.
+    # [50] JPEG кадров [51] и POST [52]. Системное сообщение, temperature, штрафы и seed — отсюда.
     # input: video — те же кадры одним роликом video/jpeg: Qwen3-VL склеивает их
     # попарно и ставит метки времени. fps vLLM для такой последовательности — 1.
     def _caption_one(self, item: tuple[Path, list[Image.Image]]) -> tuple[str, str, int]:
@@ -204,7 +199,7 @@ class VllmCaptioner:
             payload["seed"] = self.cfg.seed
         return _post_chat(self.api_base, payload)
 
-    # [17] Процесс vLLM. Семплер flashinfer выключен, воркеры через spawn.
+    # [16] Процесс vLLM с командой [17]. Семплер flashinfer выключен, воркеры через spawn.
     def _spawn(self) -> None:
         cmd = vllm_serve_command(self.cfg, self._mem_util)
         self._log_path.parent.mkdir(parents=True, exist_ok=True)

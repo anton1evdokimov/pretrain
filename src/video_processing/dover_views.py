@@ -22,7 +22,7 @@ STD = torch.FloatTensor([58.395, 57.12, 57.375])
 
 
 class UnifiedFrameSampler:
-    # [23] Параметры одной ветки из dover.yml: длина клипа, число клипов, шаг.
+    # [23] Параметры одной ветки из dover.yml: кадров в отрезке, число отрезков, шаг, повторы.
     def __init__(self, fsize_t, fragments_t, frame_interval=1, num_clips=1, drop_rate=0.0):
         self.fragments_t = fragments_t
         self.fsize_t = fsize_t
@@ -30,7 +30,8 @@ class UnifiedFrameSampler:
         self.num_clips = num_clips
         self.drop_rate = drop_rate
 
-    # [31] Индексы кадров одного клипа. Technical зовёт это несколько раз.
+    # [31] fragments_t отрезков по fsize_t кадров, у каждого свой случайный сдвиг.
+    # С dover.yml: technical — 3 отрезка по 32 кадра (3 клипа), aesthetic — 32 по 1 кадру.
     def get_frame_indices(self, num_frames: int) -> np.ndarray:
         tgrids = np.array(
             [num_frames // self.fragments_t * i for i in range(self.fragments_t)],
@@ -50,7 +51,7 @@ class UnifiedFrameSampler:
         )
         return np.concatenate(ranges_t)
 
-    # [30] Индексы всех клипов ветки. np.random здесь, поэтому вызов под lock.
+    # [30] Индексы ветки: [31] num_clips раз (в dover.yml — один). np.random, поэтому под lock.
     def __call__(self, total_frames: int) -> np.ndarray:
         frame_inds = [self.get_frame_indices(total_frames) for _ in range(self.num_clips)]
         frame_inds = np.concatenate(frame_inds)
@@ -75,7 +76,8 @@ def make_samplers(sample_types: dict) -> dict[str, UnifiedFrameSampler]:
     return samplers
 
 
-# [32] Случайные окна 7×7 для technical. Сетка одна на всё видео.
+# [32] Случайные окна 7×7 для technical. Сетка общая, сдвиг окон свой на каждый блок
+# из aligned=32 кадров, то есть на каждый из 3 клипов.
 def _fragment_coords(h: int, w: int, t: int, sopt: dict):
     fragments_h = sopt["fragments_h"]
     fragments_w = sopt["fragments_w"]
@@ -311,7 +313,8 @@ def decompose_video_nvdec(
     return _ordered_views(aesthetic, technical)
 
 
-# [37] Нормализация ImageNet и перенос клипов на GPU. Только главный поток.
+# [37] Нормализация ImageNet и раскладка по клипам. Зовётся из пула [28p]. После [28g]
+# тензоры уже на GPU; CPU-путь остаётся на cpu, на GPU их переносит [37f].
 def normalize_and_split(views: dict[str, torch.Tensor], sample_types: dict, device: str) -> dict[str, torch.Tensor]:
     prepared = {}
     for key, video in views.items():

@@ -1,6 +1,6 @@
-# v8: default (DOVER nvdec) + qwen.decoder: nvdec. Сравнивать с results_v6 (кадры Qwen на NVDEC).
+# v11: default (= v10) + qwen.system_prompt: кратко и чётко. Сравнивать с results_v10.
 input_dir: video
-output_dir: results_v8
+output_dir: experiments/results_v11
 replicate: 16
 warmup_videos: 4
 seed: 42
@@ -25,6 +25,13 @@ dover:
 qwen:
   model_id: Qwen/Qwen3-VL-2B-Instruct
   prompt: "Сгенерируй детальное описание всего, что происходит на видео"
+  # Системное сообщение перед prompt; сам prompt уходит дословно. Пусто — без него.
+  system_prompt: >-
+    Ты кратко и точно описываешь видео. Пиши связным текстом, без заголовков, списков
+    и нумерации кадров. Скажи, кто и что в кадре и что происходит, в порядке событий.
+    Если текст на экране читается, приведи его дословно; если не читается, не придумывай.
+    Не повторяй то, что не меняется, и не додумывай смысл. Объём по содержанию:
+    2–4 предложения для простой сцены, до 8 для насыщенной.
   num_frames: 8
   max_side: 384
   # 512 обрезал 9 из 10 описаний, 1024 — 6 из 8 копий 3.mp4 (430 слов, без повторов).
@@ -42,21 +49,26 @@ qwen:
   seed: 42
   # images — 8 отдельных картинок. video — те же кадры одним роликом с метками времени:
   # без перечисления «Кадр N», но в 2–4 раза короче и с выдуманным текстом на 8 кадрах,
-  # соседние кадры склеиваются попарно (results_v7).
+  # соседние кадры склеиваются попарно (results_v7). 16 кадров видео — ещё хуже:
+  # 1.mp4 зациклен в 14 из 16 копий, остальные по 35–160 слов (results_v9).
   input: images
-  # Кадры Qwen: cpu — ffmpeg, nvdec — torchcodec на GPU. С NVDEC у DOVER этап Qwen
-  # половину времени ждёт кадры от ffmpeg (results_v6: 43 с из 85).
+  # Кадры Qwen: cpu — ffmpeg, nvdec — torchcodec на GPU. Ожидание кадров 43 → 11 с,
+  # весь прогон 85.5 → 60 с (results_v6 → results_v8).
   decoder: nvdec
-  # Роликов пачки, которые готовятся к Qwen параллельно. 1 — по одному, как раньше.
+  # Роликов пачки, которые готовятся к Qwen параллельно. 1 — по одному.
   # 8 сократили этап Qwen с 217 до 136 с (results_v4).
   decode_workers: 8
+  # true — без пачек: каждый ролик «кадры → запрос» сам по себе, в vLLM до
+  # max_num_seqs запросов. false — пачки по batch_size, пачка ждёт самый длинный ответ.
+  # Вместе с max_num_seqs 64: весь прогон 60 → 50 с, качество то же (results_v10).
+  continuous: true
   batch_size: 32
   attn_implementation: auto
   # При parallel: true пайплайн сам режет долю до 0.55, чтобы рядом жил DOVER.
   backend: vllm
   dtype: bfloat16
   max_model_len: 4096
-  max_num_seqs: 32
+  max_num_seqs: 64
   gpu_memory_utilization: 0.90
   port: 8000
   api_base: ""

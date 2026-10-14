@@ -14,7 +14,7 @@ dover:
   config: third_party/DOVER/dover.yml
   device: auto
   batch_size: 8
-  # Непрерывный пул ffmpeg по одному потоку. 16 оказалось медленнее 8 (results_v4).
+  # Роликов, одновременно готовящихся к forward (NVDEC или ffmpeg). 16 оказалось медленнее 8 (results_v4).
   decode_workers: 8
   # cpu — ffmpeg → numpy → нарезка в Python. nvdec — torchcodec на GPU, виды
   # собираются тензорно; при ошибке ролик уходит в cpu. Паритет: scripts/dover_parity.py
@@ -36,7 +36,7 @@ qwen:
   num_frames: 8
   max_side: 384
   # 512 обрезал 9 из 10 описаний, 1024 — 6 из 8 копий 3.mp4 (430 слов, без повторов).
-  # 8×384 — ~750 токенов промпта, с 1536 новыми влезает в max_model_len 4096.
+  # 8×384 с системным сообщением — ~850 токенов промпта, с 1536 новыми влезает в max_model_len 4096.
   max_tokens: 1536
   temperature: 0.3
   # 1.0 — без штрафа. 1.1 режет зацикливание, но подозревается в ошибках
@@ -56,12 +56,12 @@ qwen:
   # Кадры Qwen: cpu — ffmpeg, nvdec — torchcodec на GPU. Ожидание кадров 43 → 11 с,
   # весь прогон 85.5 → 60 с (results_v6 → results_v8).
   decoder: nvdec
-  # Роликов пачки, которые готовятся к Qwen параллельно. 1 — по одному, как раньше.
+  # Роликов пачки, которые готовятся к Qwen параллельно. 1 — по одному.
   # 8 сократили этап Qwen с 217 до 136 с (results_v4).
   decode_workers: 8
   # true — без пачек: каждый ролик «кадры → запрос» сам по себе, в vLLM до
   # max_num_seqs запросов. false — пачки по batch_size, пачка ждёт самый длинный ответ.
-  # Вместе с max_num_seqs 64: весь прогон 60 → 50 с, качество как было (results_v10).
+  # Вместе с max_num_seqs 64: весь прогон 60 → 50 с, качество то же (results_v10).
   continuous: true
   batch_size: 32
   attn_implementation: auto

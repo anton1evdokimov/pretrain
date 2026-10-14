@@ -5,7 +5,9 @@
 1. **DOVER** — техническое и эстетическое качество, плюс общая оценка. Шкала `[0, 1]`, fusion как в официальном `evaluate_a_set_of_videos.py` на конфиге `val-l1080p`.
 2. **Qwen3-VL-2B-Instruct** — описание. Промпт задания уходит модели дословно: «Сгенерируй детальное описание всего, что происходит на видео». Перед ним стоит системное сообщение, которое просит писать кратко и без выдумок (см. [Конфиг](#конфиг)).
 
-Скорость на A100 80 ГБ — **3.40 видео/с в установившемся режиме** (около 12 200 видео в час), замер на 640 заданиях (`configs/final_r64.yaml`, `results_final/`). Загрузка моделей — ещё около 50 с, один раз. Первый корректный замер был 0.69 видео/с. Что и почему ускоряли — в [REPORT.md](REPORT.md).
+**Результат на 10 видео** — [`results_final/RESULTS.md`](results_final/RESULTS.md): technical, aesthetic, overall и описание каждого ролика, плюс скорость. То же в `results.csv` и `results.json`.
+
+Скорость на A100 80 ГБ — **3.40 видео/с в установившемся режиме** (около 12 200 видео в час), замер на 640 заданиях (`configs/final_r64.yaml`). Загрузка моделей — ещё около 50 с, один раз. Baseline — 0.69 видео/с. Какие подходы рассматривали, как их сгруппировали по влиянию и что реализовали — в [REPORT.md](REPORT.md).
 
 ## Запуск
 
@@ -16,8 +18,9 @@ pip install -U pip
 # torch, torchvision и torchcodec одной CUDA-сборки (на сервере — cu130)
 pip install torch torchvision torchcodec --index-url https://download.pytorch.org/whl/cu130
 pip install -e '.[vllm]'
-python scripts/bootstrap.py                   # код DOVER и weights/DOVER.pth
+python scripts/bootstrap.py                   # код DOVER на проверенном коммите и weights/DOVER.pth
 python -m video_processing                    # configs/default.yaml → results/
+python -m unittest discover tests             # smoke-тест без GPU: заглушки вместо моделей
 ```
 
 - Другой конфиг: `--config configs/....yaml`. Каталоги и число копий: `--input`, `--output`, `--replicate`.
@@ -34,13 +37,15 @@ python -m video_processing                    # configs/default.yaml → results
 4. Считает видео/с по wall-clock (см. [Результаты](#результаты)).
 5. Пишет оценки и описания и останавливает vLLM.
 
-`parallel: false` — сначала весь DOVER, потом Qwen, vLLM берёт `gpu_memory_utilization` из конфига. `qwen.continuous: false` — прежняя подача пачками по `qwen.batch_size`.
+`parallel: false` — сначала весь DOVER, потом Qwen, vLLM берёт `gpu_memory_utilization` из конфига. `qwen.continuous: false` — подача пачками по `qwen.batch_size`, как в baseline.
 
 ## Результаты
 
+Итоговый прогон лежит в `results_final/`, прогоны серии замеров — в `experiments/`. В каждом каталоге:
+
 | Файл | Что внутри |
 |---|---|
-| `RESULTS.md` | Скорость, сводка подписей по всем копиям, таблица technical / aesthetic / overall и описаний копии 0 |
+| `RESULTS.md` | Скорость, сводка подписей по всем копиям, таблица technical / aesthetic / overall с z-оценками и описаний копии 0 |
 | `results.json`, `results.csv` | Оценки и описания копии 0. В JSON ещё `caption_stats` и `captions_all` |
 | `captions_all.jsonl` | Подписи всех заданий: `finish_reason`, число слов, доля уникальных 8-грамм, токенов промпта |
 | `throughput.json` | Скорость |
@@ -68,7 +73,7 @@ python -m video_processing                    # configs/default.yaml → results
 | `dover.batch_size`, `dover.decode_workers` | 8, 8 | Роликов в forward и одновременно готовящихся роликов |
 | `qwen.system_prompt` | краткость и запрет выдумок | Пусто — без системного сообщения |
 | `qwen.num_frames`, `qwen.max_side` | 8, 384 | Визуальный бюджет: главный рычаг «качество против скорости» |
-| `qwen.input` | `images` | `video` — те же кадры одним роликом. Хуже по фактам (results_v7, results_v9) |
+| `qwen.input` | `images` | `video` — те же кадры одним роликом. Хуже по фактам (`experiments/results_v7`, `results_v9`) |
 | `qwen.decoder` | `nvdec` | `cpu` — ffmpeg |
 | `qwen.continuous`, `qwen.max_num_seqs` | `true`, 64 | Непрерывная подача и предел одновременных запросов в vLLM |
 | `qwen.decode_workers` | 8 | Одновременно готовящихся роликов |
@@ -76,7 +81,7 @@ python -m video_processing                    # configs/default.yaml → results
 | `qwen.temperature`, `repetition_penalty`, `presence_penalty`, `seed` | 0.3, 1.1, 0.0, 42 | Сэмплинг. Seed не даёт побайтной воспроизводимости: результат vLLM зависит от состава батча |
 | `qwen.backend` | `vllm` | `transformers` — запасной путь без режима видео |
 | `qwen.max_model_len` | 4096 | 8 кадров — около 850 токенов промпта плюс ответ |
-| `cpu_threads` | 0 | Потоки torch и OpenCV. 2 замедлили DOVER (results_v4) |
+| `cpu_threads` | 0 | Потоки torch и OpenCV. 2 замедлили DOVER (`experiments/results_v4`) |
 
 С этими флагами пайплайн поднимает vLLM в параллельном режиме:
 
@@ -97,10 +102,10 @@ vllm serve Qwen/Qwen3-VL-2B-Instruct \
 
 | Скрипт | Зачем |
 |---|---|
-| `scripts/run_series.sh name config [name config …]` | Прогоны по очереди, у каждого свои `logs/vmstat_*.txt`, `logs/*_stderr.txt` и лог vLLM. В конце — сравнение с `BASE` (по умолчанию `results_v8`) |
-| `scripts/compare_runs.py results_a results_b …` | Скорость и качество подписей нескольких прогонов рядом |
-| `scripts/dover_parity.py [--decoder nvdec] [--demo]` | Входы и оценки DOVER против официального кода, `--demo` — против z-оценок из README DOVER |
+| `scripts/run_series.sh name config [name config …]` | Прогоны по очереди, у каждого свои `logs/vmstat_*.txt`, `logs/*_stderr.txt` и лог vLLM. В конце — сравнение с `BASE` (по умолчанию `experiments/results_v11`) |
+| `scripts/compare_runs.py dir_a dir_b …` | Скорость и качество подписей нескольких прогонов рядом |
+| `scripts/dover_parity.py [--decoder nvdec] [--demo]` | Входы и оценки DOVER против официального кода, `--demo` — против z-оценок из README DOVER. Вывод на A100 — `experiments/results_parity_*.txt` |
 | `scripts/dover_decode_bench.py` | Только подготовка DOVER: CPU против NVDEC, 1 и 8 потоков |
-| `python -m video_processing --ablate` | Старый подбор батчей и визуального бюджета, стадии гоняются по отдельности. Сводка — `results/ABLATION.md` |
+| `tests/test_pipeline.py` | Smoke-тест: весь `run_pipeline` с заглушками DOVER и Qwen, обе схемы подачи в Qwen, запись результатов |
 
-Конфиги `configs/v8_*.yaml`–`v11_*.yaml` и `final_r64.yaml` — точные настройки прогонов из [REPORT.md](REPORT.md), каждый отличается от предыдущего одним изменением. `ab_*.yaml` — ранний A/B штрафов за повторы на тогдашнем конфиге.
+`experiments/configs/v8_*.yaml`–`v11_*.yaml` — точные настройки прогонов из истории в [REPORT.md](REPORT.md), каждый отличается от предыдущего одним изменением. `ab_*.yaml` — ранний A/B штрафов за повторы. `configs/v12_detailed.yaml` — следующий кандидат: системное сообщение без «кратко» и лимита предложений.

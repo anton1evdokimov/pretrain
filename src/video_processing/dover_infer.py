@@ -23,11 +23,15 @@ from video_processing.dover_views import (
 from video_processing.weights import ensure_dover_weights
 
 
+# Сырой скор ветки → z относительно калибровки DOVER (official evaluate_a_set_of_videos.py).
+def dover_z(aesthetic_raw: float, technical_raw: float) -> tuple[float, float]:
+    return (aesthetic_raw + 0.08285) / 0.03774, (technical_raw - 0.1107) / 0.07355
+
+
 # [40] z-score и веса как в evaluate_a_set_of_videos: aesthetic, technical, overall.
 def fuse_results(results: list[float]) -> dict[str, float]:
-    # results[0] aesthetic, results[1] technical (official evaluate_a_set_of_videos.py)
-    technical_z = (results[1] - 0.1107) / 0.07355
-    aesthetic_z = (results[0] + 0.08285) / 0.03774
+    # results[0] aesthetic, results[1] technical
+    aesthetic_z, technical_z = dover_z(results[0], results[1])
     fused = technical_z * 0.6104 + aesthetic_z * 0.3896
     return {
         "aesthetic": float(1 / (1 + np.exp(-aesthetic_z))),
@@ -71,11 +75,11 @@ class DoverScorer:
         self._model = None
         release_memory()
 
-    # Один ролик через [27]. Основной прогон зовёт [27] сразу пачкой.
+    # Один ролик через [27]. Основной прогон идёт через [27s].
     def score(self, path: Path) -> dict[str, float]:
         return self.score_batch([path])[0]
 
-    # [27] Параллельный декод [28], затем один forward на пачку.
+    # [27] Пачка вне основного прогона: подготовка [28p] в пуле, затем один forward [37f].
     def score_batch(self, paths: list[Path]) -> list[dict[str, float]]:
         if self._model is None:
             self.load()
@@ -138,7 +142,8 @@ class DoverScorer:
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
 
-    # [28p] Подготовка одного ролика: кадры [28]/[28g] и нормализация [37]. Зовётся из пула.
+    # [28p] Подготовка одного ролика: NVDEC [28n] или CPU [28], затем нормализация [37].
+    # Зовётся из пула [27s].
     def prepare(self, path: Path, ffmpeg_threads: int = 1) -> dict[str, torch.Tensor]:
         if self.cfg.decoder == "nvdec" and str(self.device).startswith("cuda"):
             try:
@@ -153,7 +158,8 @@ class DoverScorer:
         )
         return normalize_and_split(views, self._sample_types, "cpu")
 
-    # [28n] Свой CUDA stream на поток пула: подготовка не ждёт forward на default stream.
+    # [28n] [28g] и [37] на своём CUDA stream потока пула: подготовка не ждёт forward
+    # на default stream.
     def _prepare_nvdec(self, path: Path) -> dict[str, torch.Tensor]:
         stream = getattr(self._streams, "stream", None)
         if stream is None:
@@ -164,7 +170,7 @@ class DoverScorer:
         stream.synchronize()
         return prepared
 
-    # [37f] Один forward DOVER на уже подготовленные ролики.
+    # [37f] Один forward DOVER на уже подготовленные ролики, затем [38], [39], [40].
     def score_prepared(self, prepared: list[dict[str, torch.Tensor]]) -> list[dict[str, float]]:
         n_videos = len(prepared)
         aesthetic = torch.cat([item["aesthetic"] for item in prepared], dim=0)
