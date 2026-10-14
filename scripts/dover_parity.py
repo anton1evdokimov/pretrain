@@ -8,6 +8,7 @@ dover_predictions/*.pkl come from that setup.
 
     python scripts/dover_parity.py --videos 1 6 9 --device cpu
     python scripts/dover_parity.py --demo --device cpu   # vs README of DOVER
+    python scripts/dover_parity.py --videos 1 3 6 9 --device cuda --decoder nvdec
 """
 
 from __future__ import annotations
@@ -116,7 +117,7 @@ def _compare(scorer, official, paths, device, seed) -> None:
         ref = _official_views(official, path, st, samplers)
         print(f"\n{path.name}")
         for key in ours:
-            diff = (ours[key] - ref[key]).abs()
+            diff = (ours[key].cpu() - ref[key]).abs()
             print(f"  input diff {key:9s} max={float(diff.max()):.4f} mean={float(diff.mean()):.5f}")
         for label, clips in (("project", ours), ("official", ref)):
             s = fuse_results(list(_raw(model, clips, device)))
@@ -151,10 +152,12 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--demo", action="store_true", help="17734.mp4 против README DOVER")
+    parser.add_argument("--decoder", default="cpu", choices=["cpu", "nvdec"])
     args = parser.parse_args()
 
     cfg = load_config(ROOT / "configs" / "default.yaml")
     cfg.dover.device = args.device
+    cfg.dover.decoder = args.decoder
     scorer = DoverScorer(cfg.dover)
     scorer.load()
     if args.demo:

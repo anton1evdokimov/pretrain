@@ -16,6 +16,7 @@ class DoverConfig:
     device: str = "auto"
     batch_size: int = 8
     decode_workers: int = 0
+    decoder: str = "cpu"
 
 
 @dataclass
@@ -30,6 +31,7 @@ class QwenConfig:
     presence_penalty: float = 0.0
     seed: int | None = None
     decode_workers: int = 1
+    input: str = "images"
     batch_size: int = 8
     attn_implementation: str = "auto"
     backend: str = "vllm"
@@ -82,6 +84,7 @@ def load_config(path: str | Path | None) -> AppConfig:
             device=str(dover_raw.get("device", "auto")),
             batch_size=int(dover_raw.get("batch_size", 8)),
             decode_workers=int(dover_raw.get("decode_workers", 0)),
+            decoder=str(dover_raw.get("decoder", "cpu")),
         ),
         qwen=QwenConfig(
             model_id=str(qwen_raw.get("model_id", "Qwen/Qwen3-VL-2B-Instruct")),
@@ -99,6 +102,7 @@ def load_config(path: str | Path | None) -> AppConfig:
             presence_penalty=float(qwen_raw.get("presence_penalty", 0.0)),
             seed=int(qwen_raw.get("seed", raw.get("seed", 42))),
             decode_workers=int(qwen_raw.get("decode_workers", 1)),
+            input=str(qwen_raw.get("input", "images")),
             batch_size=int(qwen_raw.get("batch_size", 8)),
             attn_implementation=str(qwen_raw.get("attn_implementation", "auto")),
             backend=str(qwen_raw.get("backend", "vllm")),

@@ -187,6 +187,10 @@ def decompose_video(
         for t in tech_slots.get(idx, []):
             _fill_fragments(technical, rgb, t, tech_coords)
 
+    return _ordered_views(aesthetic, technical)
+
+
+def _ordered_views(aesthetic, technical) -> dict[str, torch.Tensor]:
     views = {}
     # порядок как в official evaluate_a_set_of_videos: aesthetic, technical
     if aesthetic is not None:
@@ -196,14 +200,125 @@ def decompose_video(
     return views
 
 
+# [32g] Левые верхние углы окон [32] для каждого слота technical: [T, fh, fw].
+def _fragment_offsets(coords: dict, n_slots: int, device) -> tuple[torch.Tensor, torch.Tensor]:
+    blocks = torch.clamp(
+        torch.arange(n_slots) // coords["aligned"], max=coords["rnd_h"].shape[-1] - 1
+    )
+    hgrids = torch.tensor(coords["hgrids"], dtype=torch.int64)
+    wgrids = torch.tensor(coords["wgrids"], dtype=torch.int64)
+    h0 = hgrids[None, :, None] + coords["rnd_h"][:, :, blocks].permute(2, 0, 1)
+    w0 = wgrids[None, None, :] + coords["rnd_w"][:, :, blocks].permute(2, 0, 1)
+    return h0.to(device), w0.to(device)
+
+
+# [36g] Все окна [36t] пачки кадров одним gather: frames [n,3,H,W] → target[:, slots].
+def _fill_fragments_gpu(
+    target: torch.Tensor,
+    frames: torch.Tensor,
+    slots: torch.Tensor,
+    positions: torch.Tensor,
+    h0: torch.Tensor,
+    w0: torch.Tensor,
+    coords: dict,
+) -> None:
+    fsize_h, fsize_w = coords["fsize_h"], coords["fsize_w"]
+    rows = h0[slots][..., None] + torch.arange(fsize_h, device=frames.device)
+    cols = w0[slots][..., None] + torch.arange(fsize_w, device=frames.device)
+    # [S, fh, fw, fsize_h, fsize_w, 3]
+    patches = frames[
+        positions[:, None, None, None, None],
+        :,
+        rows[:, :, :, :, None],
+        cols[:, :, :, None, :],
+    ]
+    n, fh, fw = patches.shape[:3]
+    target[:, slots] = (
+        patches.permute(5, 0, 1, 3, 2, 4).reshape(3, n, fh * fsize_h, fw * fsize_w).float()
+    )
+
+
+# [28g] То же, что [28], но кадры декодирует NVDEC (torchcodec), а resize и окна
+# считаются на GPU. Порядок вызовов RNG как в [28], поэтому при равном seed
+# индексы и окна совпадают с CPU-путём.
+def decompose_video_nvdec(
+    path: Path,
+    sample_types: dict,
+    samplers: dict[str, UnifiedFrameSampler],
+    device: str = "cuda",
+    chunk: int = 16,
+) -> dict[str, torch.Tensor]:
+    from torchcodec.decoders import VideoDecoder
+
+    meta = probe_video(path)
+    n_frames = max(int(meta["nb_frames"]), 1)
+    width, height = int(meta["width"]), int(meta["height"])
+    with _SAMPLER_LOCK:
+        frame_inds = {stype: sampler(n_frames) for stype, sampler in samplers.items()}
+    needed = sorted({int(i) for inds in frame_inds.values() for i in inds.tolist()})
+
+    aesthetic_inds = frame_inds.get("aesthetic")
+    technical_inds = frame_inds.get("technical")
+    aes_opt = sample_types.get("aesthetic") or {}
+    tech_opt = sample_types.get("technical") or {}
+    aesthetic = technical = None
+    aes_slots: dict[int, list[int]] = {}
+    tech_slots: dict[int, list[int]] = {}
+    if aesthetic_inds is not None:
+        aesthetic = torch.empty(
+            3, len(aesthetic_inds), aes_opt["size_h"], aes_opt["size_w"],
+            dtype=torch.float32, device=device,
+        )
+        for t, src in enumerate(aesthetic_inds.tolist()):
+            aes_slots.setdefault(int(src), []).append(t)
+    if technical_inds is not None:
+        tech_coords = _fragment_coords(height, width, len(technical_inds), tech_opt)
+        technical = torch.empty(
+            3,
+            len(technical_inds),
+            tech_opt["fragments_h"] * tech_opt["fsize_h"],
+            tech_opt["fragments_w"] * tech_opt["fsize_w"],
+            dtype=torch.float32,
+            device=device,
+        )
+        h0, w0 = _fragment_offsets(tech_coords, len(technical_inds), device)
+        for t, src in enumerate(technical_inds.tolist()):
+            tech_slots.setdefault(int(src), []).append(t)
+
+    decoder = VideoDecoder(str(path), device=device, seek_mode="exact")
+    last = int(decoder.metadata.num_frames or n_frames) - 1
+    for start in range(0, len(needed), chunk):
+        part = needed[start : start + chunk]
+        frames = decoder.get_frames_at(indices=[min(idx, last) for idx in part]).data
+        if tuple(frames.shape[-2:]) != (height, width):
+            raise RuntimeError(
+                f"NVDEC отдал {tuple(frames.shape[-2:])}, ffprobe — {(height, width)}: {path}"
+            )
+        aes_pairs = [(t, k) for k, idx in enumerate(part) for t in aes_slots.get(idx, [])]
+        if aes_pairs:
+            slots, positions = zip(*aes_pairs)
+            resized = torchvision.transforms.functional.resize(
+                frames[list(positions)], [aes_opt["size_h"], aes_opt["size_w"]], antialias=False
+            )
+            aesthetic[:, list(slots)] = resized.permute(1, 0, 2, 3).float()
+        tech_pairs = [(t, k) for k, idx in enumerate(part) for t in tech_slots.get(idx, [])]
+        if tech_pairs:
+            slots, positions = (
+                torch.tensor(v, dtype=torch.int64, device=device) for v in zip(*tech_pairs)
+            )
+            _fill_fragments_gpu(technical, frames, slots, positions, h0, w0, tech_coords)
+        del frames
+    return _ordered_views(aesthetic, technical)
+
+
 # [37] Нормализация ImageNet и перенос клипов на GPU. Только главный поток.
 def normalize_and_split(views: dict[str, torch.Tensor], sample_types: dict, device: str) -> dict[str, torch.Tensor]:
     prepared = {}
-    mean = MEAN.to(device)
-    std = STD.to(device)
     for key, video in views.items():
+        mean = MEAN.to(video.device)
+        std = STD.to(video.device)
         num_clips = sample_types[key].get("num_clips", 1)
-        normed = ((video.permute(1, 2, 3, 0) - mean.cpu()) / std.cpu()).permute(3, 0, 1, 2)
+        normed = ((video.permute(1, 2, 3, 0) - mean) / std).permute(3, 0, 1, 2)
         prepared[key] = (
             normed.reshape(normed.shape[0], num_clips, -1, *normed.shape[2:])
             .transpose(0, 1)

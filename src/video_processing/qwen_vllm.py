@@ -42,6 +42,11 @@ def vllm_serve_command(cfg: QwenConfig, gpu_memory_utilization: float | None = N
     # Startup profiles the vision encoder at processor max_pixels. Qwen's
     # default is millions of pixels per frame and OOMs the engine before /health.
     pixels = max(int(cfg.max_side) * int(cfg.max_side), 4096)
+    video = cfg.input == "video"
+    if video:
+        # У видео Qwen3-VL max_pixels — бюджет на все кадры (T·H·W), не на один.
+        # С бюджетом одной картинки 8 кадров ужались бы до ~180×100.
+        pixels *= max(int(cfg.num_frames), 1)
     mm_kwargs = json.dumps({"min_pixels": 4096, "max_pixels": pixels})
     return [
         sys.executable,
@@ -58,9 +63,9 @@ def vllm_serve_command(cfg: QwenConfig, gpu_memory_utilization: float | None = N
         "--gpu-memory-utilization",
         f"{util:g}",
         "--limit-mm-per-prompt.image",
-        str(cfg.num_frames),
+        "0" if video else str(cfg.num_frames),
         "--limit-mm-per-prompt.video",
-        "0",
+        "1" if video else "0",
         "--mm-processor-kwargs",
         mm_kwargs,
         "--mm-processor-cache-gb",
@@ -153,8 +158,10 @@ class VllmCaptioner:
         return self.caption_batch([(path, images)])[0][0]
 
     # [49] До 32 запросов [50] параллельно. Слоты пакует уже vLLM.
-    # Каждый элемент — (текст, finish_reason); "length" значит обрезано по max_tokens.
-    def caption_batch(self, items: list[tuple[Path, list[Image.Image]]]) -> list[tuple[str, str]]:
+    # Каждый элемент — (текст, finish_reason, токенов промпта); "length" — обрезано по max_tokens.
+    def caption_batch(
+        self, items: list[tuple[Path, list[Image.Image]]]
+    ) -> list[tuple[str, str, int]]:
         if not items:
             return []
         workers = min(len(items), 32)
@@ -162,11 +169,21 @@ class VllmCaptioner:
             return list(pool.map(self._caption_one, items))
 
     # [50] JPEG кадров [51] и POST [52]. temperature и repetition_penalty отсюда.
-    def _caption_one(self, item: tuple[Path, list[Image.Image]]) -> tuple[str, str]:
+    # input: video — те же кадры одним роликом video/jpeg: Qwen3-VL склеивает их
+    # попарно и ставит метки времени. fps vLLM для такой последовательности — 1.
+    def _caption_one(self, item: tuple[Path, list[Image.Image]]) -> tuple[str, str, int]:
         _, images = item
         content: list[dict] = []
-        for image in images:
-            content.append({"type": "image_url", "image_url": {"url": _jpeg_data_url(image)}})
+        if self.cfg.input == "video":
+            frames = ",".join(_jpeg_base64(image) for image in images)
+            content.append(
+                {"type": "video_url", "video_url": {"url": f"data:video/jpeg;base64,{frames}"}}
+            )
+        else:
+            for image in images:
+                content.append(
+                    {"type": "image_url", "image_url": {"url": _jpeg_data_url(image)}}
+                )
         content.append({"type": "text", "text": self.cfg.prompt})
         payload = {
             "model": self.cfg.model_id,
@@ -191,8 +208,8 @@ class VllmCaptioner:
         # Parent already imported torch. Forked engine workers then die in
         # CUDA init and the API process only reports an empty core-proc set.
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        # Greedy decode never uses top-k/top-p. FlashInfer still JIT-builds
-        # that sampling kernel at warmup and ninja takes the engine down.
+        # FlashInfer JIT-builds its top-k/top-p sampling kernel at warmup and
+        # ninja takes the engine down. The PyTorch sampler covers the same params.
         env["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
         print("vLLM:", " ".join(cmd), flush=True)
         self._proc = subprocess.Popen(
@@ -225,16 +242,19 @@ class VllmCaptioner:
         )
 
 
-# [51] Кадр уже уменьшен, здесь только JPEG в data-url.
-def _jpeg_data_url(image: Image.Image) -> str:
+# [51] Кадр уже уменьшен, здесь только JPEG в base64 / data-url.
+def _jpeg_base64(image: Image.Image) -> str:
     buf = io.BytesIO()
     image.convert("RGB").save(buf, format="JPEG", quality=90)
-    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/jpeg;base64,{encoded}"
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-# [52] POST /v1/chat/completions, из ответа забирает текст подписи и finish_reason.
-def _post_chat(api_base: str, payload: dict) -> tuple[str, str]:
+def _jpeg_data_url(image: Image.Image) -> str:
+    return f"data:image/jpeg;base64,{_jpeg_base64(image)}"
+
+
+# [52] POST /v1/chat/completions: текст подписи, finish_reason и токенов промпта.
+def _post_chat(api_base: str, payload: dict) -> tuple[str, str, int]:
     req = urllib.request.Request(
         api_base.rstrip("/") + "/v1/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -249,7 +269,12 @@ def _post_chat(api_base: str, payload: dict) -> tuple[str, str]:
         raise RuntimeError(f"vLLM HTTP {exc.code}: {detail}") from exc
     choice = (body.get("choices") or [{}])[0]
     text = (choice.get("message") or {}).get("content") or ""
-    return " ".join(str(text).split()).strip(), str(choice.get("finish_reason") or "")
+    prompt_tokens = int((body.get("usage") or {}).get("prompt_tokens") or 0)
+    return (
+        " ".join(str(text).split()).strip(),
+        str(choice.get("finish_reason") or ""),
+        prompt_tokens,
+    )
 
 
 # [18b] Кусок лога vLLM с настоящей ошибкой EngineCore, не обёртка в хвосте.

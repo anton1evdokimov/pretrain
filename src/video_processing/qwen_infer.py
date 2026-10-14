@@ -21,6 +21,8 @@ def make_captioner(cfg: QwenConfig, device: str = "auto"):
         return VllmCaptioner(cfg, device=device)
     if cfg.backend not in ("transformers", "hf", ""):
         raise ValueError(f"неизвестный qwen.backend: {cfg.backend}")
+    if cfg.input != "images":
+        raise ValueError(f"qwen.input: {cfg.input} есть только у backend: vllm")
     return QwenCaptioner(cfg, device=device)
 
 
@@ -103,8 +105,10 @@ class QwenCaptioner:
         return self.caption_batch([(path, images)])[0][0]
 
     # Ветка transformers: один generate на пачку, do_sample если temperature > 0.
-    # Как у vLLM: (текст, finish_reason), "length" — без EOS до max_tokens.
-    def caption_batch(self, items: list[tuple[Path, list[Image.Image]]]) -> list[tuple[str, str]]:
+    # Как у vLLM: (текст, finish_reason, токенов промпта), "length" — без EOS до max_tokens.
+    def caption_batch(
+        self, items: list[tuple[Path, list[Image.Image]]]
+    ) -> list[tuple[str, str, int]]:
         if self._model is None or self._processor is None:
             self.load()
         prompt = self.cfg.prompt or USER_PROMPT
@@ -130,9 +134,13 @@ class QwenCaptioner:
         eos = self._model.generation_config.eos_token_id
         eos_ids = torch.tensor(eos if isinstance(eos, (list, tuple)) else [eos], device=trimmed.device)
         stopped = torch.isin(trimmed, eos_ids).any(dim=1).tolist()
+        mask = inputs.get("attention_mask")
+        prompt_tokens = (
+            mask.sum(dim=1).tolist() if mask is not None else [input_len] * len(texts)
+        )
         return [
-            (" ".join(text.split()).strip(), "stop" if done else "length")
-            for text, done in zip(texts, stopped)
+            (" ".join(text.split()).strip(), "stop" if done else "length", int(n))
+            for text, done, n in zip(texts, stopped, prompt_tokens)
         ]
 
 

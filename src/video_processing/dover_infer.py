@@ -14,7 +14,12 @@ import yaml
 
 from video_processing.config import ROOT, DoverConfig
 from video_processing.device import pick_torch_device, release_memory, sync
-from video_processing.dover_views import decompose_video, make_samplers, normalize_and_split
+from video_processing.dover_views import (
+    decompose_video,
+    decompose_video_nvdec,
+    make_samplers,
+    normalize_and_split,
+)
 from video_processing.weights import ensure_dover_weights
 
 
@@ -39,6 +44,7 @@ class DoverScorer:
         self._model = None
         self._sample_types = None
         self._samplers = None
+        self._streams = threading.local()
 
     # [19] Чекпоинт, семплеры [22] и сама сеть. Выключение checkpointing — здесь же.
     def load(self) -> None:
@@ -132,8 +138,13 @@ class DoverScorer:
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
 
-    # [28p] CPU-часть одного ролика: кадры [28] и нормализация [37]. Зовётся из пула.
+    # [28p] Подготовка одного ролика: кадры [28]/[28g] и нормализация [37]. Зовётся из пула.
     def prepare(self, path: Path, ffmpeg_threads: int = 1) -> dict[str, torch.Tensor]:
+        if self.cfg.decoder == "nvdec" and str(self.device).startswith("cuda"):
+            try:
+                return self._prepare_nvdec(path)
+            except Exception as exc:
+                print(f"[dover] NVDEC: {path.name} → cpu ({exc})", file=sys.stderr)
         views = decompose_video(
             path,
             self._sample_types,
@@ -141,6 +152,17 @@ class DoverScorer:
             ffmpeg_threads=ffmpeg_threads,
         )
         return normalize_and_split(views, self._sample_types, "cpu")
+
+    # [28n] Свой CUDA stream на поток пула: подготовка не ждёт forward на default stream.
+    def _prepare_nvdec(self, path: Path) -> dict[str, torch.Tensor]:
+        stream = getattr(self._streams, "stream", None)
+        if stream is None:
+            stream = self._streams.stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            views = decompose_video_nvdec(path, self._sample_types, self._samplers)
+            prepared = normalize_and_split(views, self._sample_types, self.device)
+        stream.synchronize()
+        return prepared
 
     # [37f] Один forward DOVER на уже подготовленные ролики.
     def score_prepared(self, prepared: list[dict[str, torch.Tensor]]) -> list[dict[str, float]]:
@@ -153,6 +175,10 @@ class DoverScorer:
         }
         aes_clips = self._sample_types["aesthetic"].get("num_clips", 1)
         tech_clips = self._sample_types["technical"].get("num_clips", 1)
+        if aesthetic.is_cuda:
+            # Виды [28n] выделены на stream воркера: до освобождения cat должен
+            # дочитать их, иначе аллокатор отдаст память следующему ролику.
+            torch.cuda.current_stream().synchronize()
         del prepared, aesthetic, technical
         if self.device == "cuda":
             torch.cuda.empty_cache()

@@ -77,6 +77,47 @@ def _chunks(items: list, size: int):
 
 OVERLAP_VLLM_FRACTION = 0.50
 
+# Доля уникальных 8-грамм слов ниже этого порога — описание зациклилось.
+LOOP_UNIQ8 = 0.90
+
+
+def _uniq8(text: str) -> float:
+    words = text.split()
+    grams = [tuple(words[i : i + 8]) for i in range(len(words) - 7)]
+    return len(set(grams)) / len(grams) if grams else 1.0
+
+
+# [42c] Одна подпись любого джоба, не только копии 0: качество меряется по всем копиям.
+def _caption_record(index: int, copy: int, path: Path, text: str, finish: str, tokens: int) -> dict:
+    return {
+        "job": index,
+        "copy": copy,
+        "video": path.name,
+        "finish_reason": finish,
+        "prompt_tokens": tokens,
+        "words": len(text.split()),
+        "uniq8": round(_uniq8(text), 4),
+        "caption": text,
+    }
+
+
+# [42s] По каждому ролику: сколько копий обрезано и зациклилось, средняя длина.
+def _caption_stats(records: list[dict], videos: list[Path]) -> dict:
+    stats = {}
+    for path in videos:
+        rows = [r for r in records if r["video"] == path.name]
+        if not rows:
+            continue
+        stats[path.name] = {
+            "jobs": len(rows),
+            "truncated": sum(r["finish_reason"] == "length" for r in rows),
+            "looped": sum(r["uniq8"] < LOOP_UNIQ8 for r in rows),
+            "words_mean": round(_mean([r["words"] for r in rows]), 1),
+            "uniq8_mean": round(_mean([r["uniq8"] for r in rows]), 4),
+            "prompt_tokens": round(_mean([r["prompt_tokens"] for r in rows]), 1),
+        }
+    return stats
+
 
 # [42] Часы видео/с по событиям «ролик закончили оба потока».
 # Старт — событие, на котором набралось warmup роликов. Стабильное окно кончается,
@@ -129,6 +170,7 @@ def run_pipeline(
     overlap_info: dict = {}
     load_sec: dict[str, float] = {}
     qwen_truncated = 0
+    caption_records: list[dict] = []
     if cfg.parallel and not skip_qwen and cached_dover_scores is None:
         overlapped = True
         bundle = _run_overlapped(cfg, dover, qwen, jobs)
@@ -141,6 +183,7 @@ def run_pipeline(
         qwen_truncated = bundle["qwen_truncated"]
         overlap_info = bundle["overlap"]
         load_sec = bundle["load_sec"]
+        caption_records = bundle["caption_records"]
     elif cached_dover_scores is not None:
         dover_scores = cached_dover_scores
         dover_times = list(cached_dover_times or [])
@@ -212,10 +255,13 @@ def run_pipeline(
                     sync(qwen.device)
                     elapsed = time.perf_counter() - t0
                     per_item = elapsed / max(len(batch), 1)
-                    for (copy, path), (text, finish) in zip(batch, texts):
+                    for (copy, path), (text, finish, tokens) in zip(batch, texts):
                         if n_done >= cfg.warmup_videos:
                             qwen_times.append(per_item)
                         qwen_truncated += finish == "length"
+                        caption_records.append(
+                            _caption_record(n_done, copy, path, text, finish, tokens)
+                        )
                         if copy == 0 and path.name not in unique_results:
                             meta = probe_video(path)
                             scores = dover_scores[path.name]
@@ -255,10 +301,17 @@ def run_pipeline(
         load_sec=load_sec,
         qwen_truncated=0 if skip_qwen else qwen_truncated,
     )
+    caption_stats = _caption_stats(caption_records, videos)
+    if caption_records:
+        throughput["captions_looped_jobs"] = sum(s["looped"] for s in caption_stats.values())
     payload = {
         "results": [asdict(item) for item in results],
         "throughput": throughput,
+        "caption_stats": caption_stats,
+        "captions_all": caption_records,
         "config": {
+            "qwen_input": cfg.qwen.input,
+            "dover_decoder": cfg.dover.decoder,
             "replicate": cfg.replicate,
             "warmup_videos": cfg.warmup_videos,
             "qwen_model": cfg.qwen.model_id,
@@ -307,6 +360,7 @@ def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
     events: list[tuple[float, int]] = []
     last_mark: dict[str, float] = {}
     truncated = [0]
+    caption_records: list[dict] = []
 
     # [41] Ролик готов для замера, когда отметку поставили и DOVER, и Qwen.
     def _mark(kind: str, indices, now: float) -> None:
@@ -370,10 +424,13 @@ def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
                 elapsed = time.perf_counter() - t0
                 per_item = elapsed / max(len(batch), 1)
                 start = n_done
-                for (copy, path), (text, finish) in zip(batch, texts):
+                for (copy, path), (text, finish, tokens) in zip(batch, texts):
                     if n_done >= cfg.warmup_videos:
                         qwen_times.append(per_item)
                     truncated[0] += finish == "length"
+                    caption_records.append(
+                        _caption_record(n_done, copy, path, text, finish, tokens)
+                    )
                     if copy == 0 and path.name not in captions:
                         captions[path.name] = (text, finish, per_item)
                     n_done += 1
@@ -443,6 +500,7 @@ def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
         "qwen_times": qwen_times,
         "qwen_stage_sec": float(overlap.get("qwen_stage_sec") or 0.0),
         "qwen_truncated": truncated[0],
+        "caption_records": caption_records,
         "load_sec": load_sec,
         "overlap": {
             "steady": steady,
@@ -574,6 +632,9 @@ def _write_outputs(output_dir: Path, payload: dict) -> None:
     (output_dir / "throughput.json").write_text(
         json.dumps(payload["throughput"], ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    with (output_dir / "captions_all.jsonl").open("w", encoding="utf-8") as fh:
+        for record in payload.get("captions_all") or []:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     _write_markdown(output_dir / "RESULTS.md", payload)
 
 
@@ -602,9 +663,23 @@ def _write_markdown(path: Path, payload: dict) -> None:
             f"(DOVER до {t['dover_end_sec']:.1f} с, Qwen до {t['qwen_end_sec']:.1f} с). "
             f"С хвостом одной стадии было бы {t['videos_per_sec_with_tail']:.4f} видео/с"
         )
+    stats = payload.get("caption_stats") or {}
+    if stats:
+        rows += [
+            "",
+            f"## Описания по всем копиям (зациклено: доля уникальных 8-грамм < {LOOP_UNIQ8:.0%})",
+            "",
+            "| Видео | Копий | Обрезано | Зациклено | Слов в среднем | Уник. 8-грамм | Токенов промпта |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+        for name, s in stats.items():
+            rows.append(
+                f"| {name} | {s['jobs']} | {s['truncated']} | {s['looped']} | "
+                f"{s['words_mean']:.0f} | {s['uniq8_mean']:.0%} | {s['prompt_tokens']:.0f} |"
+            )
     rows += [
         "",
-        "## Оценки и описания",
+        "## Оценки и описания (копия 0)",
         "",
         "| Видео | Technical | Aesthetic | Overall | Описание |",
         "|---|---:|---:|---:|---|",
