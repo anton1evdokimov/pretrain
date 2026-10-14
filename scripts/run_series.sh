@@ -2,7 +2,7 @@
 # Прогоны по очереди, у каждого свой vmstat, stderr и лог vLLM в logs/.
 # Не одновременно: все делят один GPU, и скорости были бы несравнимы.
 #
-#   bash scripts/run_series.sh v12 configs/v12_detailed.yaml
+#   bash scripts/run_series.sh v12 experiments/configs/v12_detailed.yaml
 #   В конце — compare_runs по базе (BASE, по умолчанию experiments/results_v11)
 #   и output_dir всех запущенных конфигов.
 set -u

@@ -7,7 +7,7 @@
 
 **Результат на 10 видео** — [`results_final/RESULTS.md`](results_final/RESULTS.md): technical, aesthetic, overall и описание каждого ролика, плюс скорость. То же в `results.csv` и `results.json`.
 
-Скорость на A100 80 ГБ — **3.40 видео/с в установившемся режиме** (около 12 200 видео в час), замер на 640 заданиях (`configs/final_r64.yaml`). Загрузка моделей — ещё около 50 с, один раз. Baseline — 0.69 видео/с. Какие подходы рассматривали, как их сгруппировали по влиянию и что реализовали — в [REPORT.md](REPORT.md).
+Скорость на A100 80 ГБ — **3.41 видео/с в установившемся режиме** (около 12 300 видео в час), замер на 640 заданиях (`configs/default.yaml`, вывод в `results_final/`). Загрузка моделей — ещё около 50 с, один раз. Baseline — 0.69 видео/с. Какие подходы рассматривали, как их сгруппировали по влиянию и что реализовали — в [REPORT.md](REPORT.md).
 
 ## Запуск
 
@@ -19,7 +19,7 @@ pip install -U pip
 pip install torch torchvision torchcodec --index-url https://download.pytorch.org/whl/cu130
 pip install -e '.[vllm]'
 python scripts/bootstrap.py                   # код DOVER на проверенном коммите и weights/DOVER.pth
-python -m video_processing                    # configs/default.yaml → results/
+python -m video_processing                    # configs/default.yaml → results/, около 4 минут вместе с загрузкой
 python -m unittest discover tests             # smoke-тест без GPU: заглушки вместо моделей
 ```
 
@@ -108,4 +108,4 @@ vllm serve Qwen/Qwen3-VL-2B-Instruct \
 | `scripts/dover_decode_bench.py` | Только подготовка DOVER: CPU против NVDEC, 1 и 8 потоков |
 | `tests/test_pipeline.py` | Smoke-тест: весь `run_pipeline` с заглушками DOVER и Qwen, обе схемы подачи в Qwen, запись результатов |
 
-`experiments/configs/v8_*.yaml`–`v11_*.yaml` — точные настройки прогонов из истории в [REPORT.md](REPORT.md), каждый отличается от предыдущего одним изменением. `ab_*.yaml` — ранний A/B штрафов за повторы. `configs/v12_detailed.yaml` — следующий кандидат: системное сообщение без «кратко» и лимита предложений.
+`experiments/configs/v8_*.yaml`–`v12_*.yaml` — точные настройки прогонов из истории в [REPORT.md](REPORT.md), каждый отличается от предыдущего одним изменением. `ab_*.yaml` — ранний A/B штрафов за повторы. `v12_detailed.yaml` — отвергнутый вариант системного сообщения без «кратко».
