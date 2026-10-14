@@ -10,6 +10,7 @@ import numpy as np
 from PIL import Image
 
 
+# [29] ffprobe: размер, fps, число кадров. Ещё раз из [44] для Qwen.
 def probe_video(path: Path) -> dict:
     cmd = [
         "ffprobe",
@@ -49,6 +50,7 @@ def probe_video(path: Path) -> dict:
     }
 
 
+# [45] Равномерные индексы 8 кадров Qwen по длине ролика.
 def uniform_indices(n_frames: int, count: int) -> np.ndarray:
     if n_frames <= 0:
         return np.zeros((0,), dtype=np.int32)
@@ -58,6 +60,7 @@ def uniform_indices(n_frames: int, count: int) -> np.ndarray:
     return np.linspace(0, n_frames - 1, count).round().astype(np.int32)
 
 
+# [47] Длинная сторона кадра Qwen до max_side. DOVER сюда не ходит.
 def _resize_rgb(rgb: np.ndarray, max_side: int) -> np.ndarray:
     h, w = rgb.shape[:2]
     scale = min(1.0, max_side / max(h, w))
@@ -68,6 +71,7 @@ def _resize_rgb(rgb: np.ndarray, max_side: int) -> np.ndarray:
     return cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
+# [46] Кадры Qwen через тот же ffmpeg [34]. При обрыве pipe — [46a].
 def sample_rgb_frames(path: Path, indices: np.ndarray, max_side: int | None = None) -> dict[int, np.ndarray]:
     """Decode only the requested frames, keeping at most one full-res frame in RAM."""
     needed = {int(i) for i in indices.tolist()}
@@ -90,6 +94,7 @@ def sample_rgb_frames(path: Path, indices: np.ndarray, max_side: int | None = No
     return _sample_rgb_frames_opencv(path, needed, max_side)
 
 
+# [46a] Запасной путь: последовательный OpenCV, если ffmpeg не отдал кадр.
 def _sample_rgb_frames_opencv(
     path: Path, needed: set[int], max_side: int | None
 ) -> dict[int, np.ndarray]:
@@ -124,6 +129,7 @@ def _sample_rgb_frames_opencv(
     return captured
 
 
+# [33] Кадры DOVER по списку индексов. Первый кадр проверяет, что pipe живой.
 def iter_selected_rgb_frames(
     path: Path,
     indices: list[int],
@@ -151,6 +157,7 @@ def iter_selected_rgb_frames(
     yield from stream
 
 
+# [34] ffmpeg select=eq(n,…) → raw RGB. Битрейт идёт весь, в RGB только нужные кадры.
 def _iter_ffmpeg_rgb(
     path: Path,
     ordered: list[int],
@@ -192,6 +199,7 @@ def _iter_ffmpeg_rgb(
     assert proc.stdout is not None
     stderr_chunks: list[bytes] = []
 
+    # [34a] stderr ffmpeg в фоне, иначе pipe на stdout встаёт.
     def _drain_stderr() -> None:
         if proc.stderr is None:
             return
@@ -200,6 +208,7 @@ def _iter_ffmpeg_rgb(
     drain = threading.Thread(target=_drain_stderr, daemon=True)
     drain.start()
 
+    # [34b] Текст ошибки ffmpeg, если кадр не пришёл.
     def _stderr_text() -> str:
         drain.join(timeout=2)
         return b"".join(stderr_chunks).decode("utf-8", "replace").strip()
@@ -226,6 +235,7 @@ def _iter_ffmpeg_rgb(
         drain.join(timeout=1)
 
 
+# [35] Ровно width×height×3 байт одного кадра из pipe.
 def _read_exact(stream, size: int) -> bytes | None:
     chunks = bytearray()
     while len(chunks) < size:
@@ -236,6 +246,7 @@ def _read_exact(stream, size: int) -> bytes | None:
     return bytes(chunks)
 
 
+# [48] ndarray → PIL в порядке индексов, так кадры уходят в Qwen.
 def frames_as_pil(frames: dict[int, np.ndarray], indices: np.ndarray) -> list[Image.Image]:
     images = []
     for idx in indices.tolist():

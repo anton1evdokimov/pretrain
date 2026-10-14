@@ -50,6 +50,7 @@ class AppConfig:
     qwen: QwenConfig
 
 
+# [3] Путь из yaml. Относительный считается от корня репозитория.
 def _as_path(value: str | Path) -> Path:
     path = Path(value)
     if not path.is_absolute():
@@ -57,6 +58,7 @@ def _as_path(value: str | Path) -> Path:
     return path
 
 
+# [2] configs/default.yaml → AppConfig. Пути собирает через [3].
 def load_config(path: str | Path | None) -> AppConfig:
     cfg_path = _as_path(path or ROOT / "configs" / "default.yaml")
     raw: dict[str, Any] = yaml.safe_load(cfg_path.read_text()) or {}

@@ -22,6 +22,7 @@ STD = torch.FloatTensor([58.395, 57.12, 57.375])
 
 
 class UnifiedFrameSampler:
+    # [23] Параметры одной ветки из dover.yml: длина клипа, число клипов, шаг.
     def __init__(self, fsize_t, fragments_t, frame_interval=1, num_clips=1, drop_rate=0.0):
         self.fragments_t = fragments_t
         self.fsize_t = fsize_t
@@ -29,6 +30,7 @@ class UnifiedFrameSampler:
         self.num_clips = num_clips
         self.drop_rate = drop_rate
 
+    # [31] Индексы кадров одного клипа. Technical зовёт это несколько раз.
     def get_frame_indices(self, num_frames: int) -> np.ndarray:
         tgrids = np.array(
             [num_frames // self.fragments_t * i for i in range(self.fragments_t)],
@@ -48,12 +50,14 @@ class UnifiedFrameSampler:
         )
         return np.concatenate(ranges_t)
 
+    # [30] Индексы всех клипов ветки. np.random здесь, поэтому вызов под lock.
     def __call__(self, total_frames: int) -> np.ndarray:
         frame_inds = [self.get_frame_indices(total_frames) for _ in range(self.num_clips)]
         frame_inds = np.concatenate(frame_inds)
         return np.mod(frame_inds, max(total_frames, 1)).astype(np.int32)
 
 
+# [22] По семплеру на aesthetic и technical. Один раз при [19].
 def make_samplers(sample_types: dict) -> dict[str, UnifiedFrameSampler]:
     samplers = {}
     for stype, sopt in sample_types.items():
@@ -71,6 +75,7 @@ def make_samplers(sample_types: dict) -> dict[str, UnifiedFrameSampler]:
     return samplers
 
 
+# [32] Случайные окна 7×7 для technical. Сетка одна на всё видео.
 def _fragment_coords(h: int, w: int, t: int, sopt: dict):
     fragments_h = sopt["fragments_h"]
     fragments_w = sopt["fragments_w"]
@@ -104,6 +109,7 @@ def _fragment_coords(h: int, w: int, t: int, sopt: dict):
     }
 
 
+# [36t] Кладёт фрагменты кадра сразу в тензор 224², полный кадр не хранит.
 def _fill_fragments(target: torch.Tensor, rgb: np.ndarray, t: int, coords: dict) -> None:
     aligned = coords["aligned"]
     block = min(t // aligned, coords["rnd_h"].shape[-1] - 1)
@@ -119,14 +125,18 @@ def _fill_fragments(target: torch.Tensor, rgb: np.ndarray, t: int, coords: dict)
             target[:, t, h_s:h_e, w_s:w_e] = frame[:, h_so:h_eo, w_so:w_eo]
 
 
+# [36a] Кадр aesthetic → 224².
+# Fusion-константы и dover_predictions/*.pkl получены на torch~=1.13, где Resize
+# по uint8-тензору шёл без antialias. С antialias=True aesthetic уезжает на ~1.5σ
+# (scripts/dover_parity.py --demo).
 def _resize_to_chw(rgb: np.ndarray, size_h: int, size_w: int) -> torch.Tensor:
-    img = torch.from_numpy(rgb).permute(2, 0, 1).float()
-    resized = torchvision.transforms.functional.resize(
-        img, [size_h, size_w], antialias=True
+    img = torch.from_numpy(rgb).permute(2, 0, 1)
+    return torchvision.transforms.functional.resize(
+        img, [size_h, size_w], antialias=False
     )
-    return resized
 
 
+# [28] Один ролик: индексы, ffmpeg [34], сборка клипов на CPU.
 def decompose_video(
     path: Path,
     sample_types: dict,
@@ -186,6 +196,7 @@ def decompose_video(
     return views
 
 
+# [37] Нормализация ImageNet и перенос клипов на GPU. Только главный поток.
 def normalize_and_split(views: dict[str, torch.Tensor], sample_types: dict, device: str) -> dict[str, torch.Tensor]:
     prepared = {}
     mean = MEAN.to(device)

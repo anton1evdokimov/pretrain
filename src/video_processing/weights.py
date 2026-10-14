@@ -9,6 +9,7 @@ DOVER_URLS = [
 ]
 
 
+# [21] DOVER.pth на диске. Если файла нет, качает через [21a].
 def ensure_dover_weights(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.stat().st_size > 1_000_000:
@@ -24,6 +25,7 @@ def ensure_dover_weights(path: Path) -> Path:
     raise RuntimeError(f"не удалось скачать DOVER.pth: {last_error}")
 
 
+# [21a] Запасной путь [21]: скачать чекпоинт, в обычном прогоне не вызывается.
 def _download(url: str, path: Path) -> None:
     from huggingface_hub import hf_hub_download
     from huggingface_hub.utils import HfHubHTTPError

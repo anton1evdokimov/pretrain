@@ -13,6 +13,7 @@ from video_processing.device import pick_torch_device, release_memory, sync
 USER_PROMPT = "Сгенерируй детальное описание всего, что происходит на видео"
 
 
+# [10] backend=vllm → [11]. transformers — отдельная ветка, в текущем прогоне не идёт.
 def make_captioner(cfg: QwenConfig, device: str = "auto"):
     if cfg.backend == "vllm":
         from video_processing.qwen_vllm import VllmCaptioner
@@ -24,6 +25,7 @@ def make_captioner(cfg: QwenConfig, device: str = "auto"):
 
 
 class QwenCaptioner:
+    # Ветка transformers. Основной прогон создаёт VllmCaptioner, не этот класс.
     def __init__(self, cfg: QwenConfig, device: str = "auto"):
         self.cfg = cfg
         self.device = pick_torch_device(device)
@@ -32,6 +34,7 @@ class QwenCaptioner:
         self.dtype = None
         self.attn_implementation = None
 
+    # Ветка transformers: грузит Qwen3-VL в этот процесс.
     def load(self) -> None:
         from transformers import AutoProcessor
 
@@ -73,24 +76,32 @@ class QwenCaptioner:
         self._processor = AutoProcessor.from_pretrained(
             self.cfg.model_id, trust_remote_code=True
         )
+        # Батчевый generate decoder-only модели: при правом паддинге короткий промпт
+        # продолжается после pad-токенов. Ролики с другим аспектом дают другую длину.
+        self._processor.tokenizer.padding_side = "left"
         self.dtype = dtype
 
+    # Ветка transformers: отпускает модель.
     def unload(self) -> None:
         self._model = None
         self._processor = None
         release_memory()
 
+    # Ветка transformers: те же [45]–[48], что и у vLLM.
     def prepare_frames(self, path: Path) -> list[Image.Image]:
         meta = probe_video(path)
         indices = uniform_indices(meta["nb_frames"], self.cfg.num_frames)
         captured = sample_rgb_frames(path, indices, max_side=self.cfg.max_side)
         return frames_as_pil(captured, indices)
 
+    # Ветка transformers: один ролик через caption_batch.
     def caption(self, path: Path, frames: list[Image.Image] | None = None) -> str:
         images = frames if frames is not None else self.prepare_frames(path)
-        return self.caption_batch([(path, images)])[0]
+        return self.caption_batch([(path, images)])[0][0]
 
-    def caption_batch(self, items: list[tuple[Path, list[Image.Image]]]) -> list[str]:
+    # Ветка transformers: один generate на пачку, do_sample если temperature > 0.
+    # Как у vLLM: (текст, finish_reason), "length" — без EOS до max_tokens.
+    def caption_batch(self, items: list[tuple[Path, list[Image.Image]]]) -> list[tuple[str, str]]:
         if self._model is None or self._processor is None:
             self.load()
         prompt = self.cfg.prompt or USER_PROMPT
@@ -113,9 +124,16 @@ class QwenCaptioner:
         texts = self._processor.batch_decode(
             trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )
-        return [" ".join(text.split()).strip() for text in texts]
+        eos = self._model.generation_config.eos_token_id
+        eos_ids = torch.tensor(eos if isinstance(eos, (list, tuple)) else [eos], device=trimmed.device)
+        stopped = torch.isin(trimmed, eos_ids).any(dim=1).tolist()
+        return [
+            (" ".join(text.split()).strip(), "stop" if done else "length")
+            for text, done in zip(texts, stopped)
+        ]
 
 
+# Ветка transformers: класс Qwen3-VL из установленного пакета.
 def _model_class():
     import transformers
 
@@ -128,6 +146,7 @@ def _model_class():
     raise RuntimeError("нужен transformers>=4.57 с Qwen3-VL")
 
 
+# Ветка transformers: sdpa, при возможности flash_attention_2.
 def _attn_candidates(requested: str, device: str) -> list[str | None]:
     if requested and requested != "auto":
         return [requested, "sdpa", None]
@@ -136,12 +155,14 @@ def _attn_candidates(requested: str, device: str) -> list[str | None]:
     return ["sdpa", None]
 
 
+# Ветка transformers: кадры и промпт в формате чата.
 def _messages(images: list[Image.Image], prompt: str) -> list[dict]:
     content = [{"type": "image", "image": image} for image in images]
     content.append({"type": "text", "text": prompt})
     return [{"role": "user", "content": content}]
 
 
+# Ветка transformers: токены и пиксели пачки.
 def _prepare_inputs(processor, messages_batch: list):
     try:
         return processor.apply_chat_template(
@@ -167,6 +188,7 @@ def _prepare_inputs(processor, messages_batch: list):
         return _prepare_inputs_legacy(processor, messages_batch)
 
 
+# Ветка transformers: старый процессор, если прямой вызов не принял картинки.
 def _prepare_inputs_legacy(processor, messages_batch):
     try:
         from qwen_vl_utils import process_vision_info
@@ -188,6 +210,7 @@ def _prepare_inputs_legacy(processor, messages_batch):
     )
 
 
+# Ветка transformers: тензоры на GPU.
 def _to_device(inputs, device):
     if hasattr(inputs, "to"):
         return inputs.to(device)

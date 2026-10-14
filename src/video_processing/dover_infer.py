@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import types
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +18,7 @@ from video_processing.dover_views import decompose_video, make_samplers, normali
 from video_processing.weights import ensure_dover_weights
 
 
+# [40] z-score и веса как в evaluate_a_set_of_videos: aesthetic, technical, overall.
 def fuse_results(results: list[float]) -> dict[str, float]:
     # results[0] aesthetic, results[1] technical (official evaluate_a_set_of_videos.py)
     technical_z = (results[1] - 0.1107) / 0.07355
@@ -29,6 +32,7 @@ def fuse_results(results: list[float]) -> dict[str, float]:
 
 
 class DoverScorer:
+    # [8] Пока только конфиг и устройство [9]. Веса грузит [19].
     def __init__(self, cfg: DoverConfig):
         self.cfg = cfg
         self.device = pick_torch_device(cfg.device)
@@ -36,6 +40,7 @@ class DoverScorer:
         self._sample_types = None
         self._samplers = None
 
+    # [19] Чекпоинт, семплеры [22] и сама сеть. Выключение checkpointing — здесь же.
     def load(self) -> None:
         self._ensure_third_party()
         weights = ensure_dover_weights(self.cfg.weights)
@@ -55,54 +60,108 @@ class DoverScorer:
         model.to(self.device)
         self._model = model
 
+    # [53] Снимает DOVER с GPU после обоих потоков.
     def unload(self) -> None:
         self._model = None
         release_memory()
 
+    # Один ролик через [27]. Основной прогон зовёт [27] сразу пачкой.
     def score(self, path: Path) -> dict[str, float]:
         return self.score_batch([path])[0]
 
+    # [27] Параллельный декод [28], затем один forward на пачку.
     def score_batch(self, paths: list[Path]) -> list[dict[str, float]]:
         if self._model is None:
             self.load()
-        workers = self.cfg.decode_workers
-        if workers <= 0:
-            workers = min(len(paths), os.cpu_count() or 8)
-        workers = max(1, min(workers, len(paths)))
-        ffmpeg_threads = 1 if workers > 1 else 0
-
-        def _views(path: Path):
-            return decompose_video(
-                path,
-                self._sample_types,
-                self._samplers,
-                ffmpeg_threads=ffmpeg_threads,
-            )
-
+        workers = self._decode_workers(len(paths))
         if workers == 1:
-            views_list = [_views(path) for path in paths]
+            prepared = [self.prepare(path, ffmpeg_threads=0) for path in paths]
         else:
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                views_list = list(pool.map(_views, paths))
-        prepared = [
-            normalize_and_split(views, self._sample_types, self.device)
-            for views in views_list
-        ]
+                prepared = list(pool.map(self.prepare, paths))
+        return self.score_prepared(prepared)
 
+    # [27s] Поток пачек для основного прогона. Декод идёт в пуле без барьера на
+    # границе батча: длинный ролик не держит остальные воркеры, пачка собирается
+    # из тех, что готовы первыми. Отдаёт (индексы items, скоры) не по порядку.
+    def iter_scores(
+        self,
+        items: list[tuple[int, Path]],
+        stop: threading.Event | None = None,
+        forward_lock=None,
+    ):
+        if self._model is None:
+            self.load()
+        if not items:
+            return
+        batch_size = max(1, int(self.cfg.batch_size))
+        workers = self._decode_workers(len(items))
+        ffmpeg_threads = 1 if workers > 1 else 0
+        cap = max(2 * batch_size, batch_size + workers)
+        lock = forward_lock if forward_lock is not None else nullcontext()
+        queue = iter(items)
+        pending: dict = {}
+        ready: list[tuple[int, dict]] = []
+        pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dover-decode")
+
+        def _fill() -> None:
+            while len(pending) + len(ready) < cap:
+                item = next(queue, None)
+                if item is None:
+                    return
+                index, path = item
+                pending[pool.submit(self.prepare, path, ffmpeg_threads)] = index
+
+        try:
+            _fill()
+            while pending or ready:
+                if stop is not None and stop.is_set():
+                    return
+                if len(ready) < batch_size and pending:
+                    done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        ready.append((pending.pop(fut), fut.result()))
+                    _fill()
+                    if len(ready) < batch_size and pending:
+                        continue
+                batch, ready = ready[:batch_size], ready[batch_size:]
+                with lock:
+                    scores = self.score_prepared([views for _, views in batch])
+                yield [index for index, _ in batch], scores
+                _fill()
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+    # [28p] CPU-часть одного ролика: кадры [28] и нормализация [37]. Зовётся из пула.
+    def prepare(self, path: Path, ffmpeg_threads: int = 1) -> dict[str, torch.Tensor]:
+        views = decompose_video(
+            path,
+            self._sample_types,
+            self._samplers,
+            ffmpeg_threads=ffmpeg_threads,
+        )
+        return normalize_and_split(views, self._sample_types, "cpu")
+
+    # [37f] Один forward DOVER на уже подготовленные ролики.
+    def score_prepared(self, prepared: list[dict[str, torch.Tensor]]) -> list[dict[str, float]]:
+        n_videos = len(prepared)
         aesthetic = torch.cat([item["aesthetic"] for item in prepared], dim=0)
         technical = torch.cat([item["technical"] for item in prepared], dim=0)
+        clips = {
+            "aesthetic": aesthetic.to(self.device),
+            "technical": technical.to(self.device),
+        }
         aes_clips = self._sample_types["aesthetic"].get("num_clips", 1)
         tech_clips = self._sample_types["technical"].get("num_clips", 1)
-        clips = {"aesthetic": aesthetic, "technical": technical}
-        del views_list, prepared
+        del prepared, aesthetic, technical
         if self.device == "cuda":
             torch.cuda.empty_cache()
 
         with torch.inference_mode():
             raw = self._model(clips, reduce_scores=False)
             sync(self.device)
-            aesthetic_scores = _mean_per_video(raw[0], len(paths), aes_clips)
-            technical_scores = _mean_per_video(raw[1], len(paths), tech_clips)
+            aesthetic_scores = _mean_per_video(raw[0], n_videos, aes_clips)
+            technical_scores = _mean_per_video(raw[1], n_videos, tech_clips)
 
         out = []
         for aesthetic_raw, technical_raw in zip(aesthetic_scores, technical_scores):
@@ -112,7 +171,15 @@ class DoverScorer:
             out.append(fused)
         return out
 
+    # По одному ffmpeg с одним потоком на воркер. decode_workers: 0 — по числу ядер.
+    def _decode_workers(self, n_items: int) -> int:
+        workers = self.cfg.decode_workers
+        if workers <= 0:
+            workers = os.cpu_count() or 8
+        return max(1, min(workers, n_items))
+
     @staticmethod
+    # [20] Кладёт third_party/DOVER в sys.path без импорта decord.
     def _ensure_third_party() -> None:
         dover_root = ROOT / "third_party" / "DOVER"
         pkg_dir = dover_root / "dover"
@@ -131,6 +198,7 @@ class DoverScorer:
         sys.modules["dover"] = pkg
 
     @staticmethod
+    # [24] ConvNeXt не качает ImageNet: DOVER.pth всё равно перезаписывает веса.
     def _disable_convnext_imagenet_init() -> None:
         import dover.models.conv_backbone as conv_backbone
         import dover.models.evaluator as evaluator
@@ -144,6 +212,7 @@ class DoverScorer:
         evaluator.convnext_3d_tiny = _tiny
 
 
+# [39] Сырой скор ветки: среднее по клипам одного ролика.
 def _mean_per_video(tensor: torch.Tensor, n_videos: int, clips: int) -> list[float]:
     values = tensor.detach().float().reshape(n_videos, clips, -1).mean(dim=(1, 2))
     return [float(x) for x in values.cpu()]

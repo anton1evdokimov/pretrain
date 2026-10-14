@@ -4,6 +4,7 @@ import gc
 import os
 
 
+# [9] cuda, если карта есть. Иначе mps или cpu. Зовут [8] и [11].
 def pick_torch_device(requested: str = "auto") -> str:
     import torch
 
@@ -17,6 +18,7 @@ def pick_torch_device(requested: str = "auto") -> str:
     return "cpu"
 
 
+# [4] TF32 и cudnn.benchmark для фиксированных шейпов DOVER. Из [1], до прогона.
 def configure_cuda() -> None:
     import torch
 
@@ -31,6 +33,7 @@ def configure_cuda() -> None:
         pass
 
 
+# [38] cuda.synchronize после forward DOVER, чтобы замер не убегал вперёд.
 def sync(device: str) -> None:
     import torch
 
@@ -38,6 +41,7 @@ def sync(device: str) -> None:
         torch.cuda.synchronize()
 
 
+# [12] Имя GPU в лог и в throughput.json.
 def gpu_name() -> str | None:
     import torch
 
@@ -46,6 +50,7 @@ def gpu_name() -> str | None:
     return None
 
 
+# [59] gc и empty_cache после записи результатов.
 def release_memory() -> None:
     gc.collect()
     try:

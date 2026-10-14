@@ -17,6 +17,7 @@ QUALITY_POINTS = [
 ]
 
 
+# Не основной прогон. Только python -m video_processing --ablate.
 def run_ablation(cfg: AppConfig) -> dict:
     out_dir = cfg.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)

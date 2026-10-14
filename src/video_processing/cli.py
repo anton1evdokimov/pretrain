@@ -22,6 +22,7 @@ from video_processing.device import configure_cuda
 from video_processing.pipeline import run_pipeline
 
 
+# [1] Вход. Читает конфиг, ставит сид и зовёт [5]. Флаг --ablate сюда не входит.
 def main() -> None:
     parser = argparse.ArgumentParser(description="Video Processing: DOVER + Qwen3-VL")
     parser.add_argument("--config", default="configs/default.yaml")
