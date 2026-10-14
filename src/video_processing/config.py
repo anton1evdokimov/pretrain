@@ -29,6 +29,7 @@ class QwenConfig:
     repetition_penalty: float = 1.0
     presence_penalty: float = 0.0
     seed: int | None = None
+    decode_workers: int = 1
     batch_size: int = 8
     attn_implementation: str = "auto"
     backend: str = "vllm"
@@ -48,6 +49,7 @@ class AppConfig:
     warmup_videos: int
     seed: int
     parallel: bool
+    cpu_threads: int
     dover: DoverConfig
     qwen: QwenConfig
 
@@ -73,6 +75,7 @@ def load_config(path: str | Path | None) -> AppConfig:
         warmup_videos=int(raw.get("warmup_videos", 1)),
         seed=int(raw.get("seed", 42)),
         parallel=bool(raw.get("parallel", True)),
+        cpu_threads=int(raw.get("cpu_threads", 0)),
         dover=DoverConfig(
             weights=_as_path(dover_raw.get("weights", "weights/DOVER.pth")),
             config=_as_path(dover_raw.get("config", "third_party/DOVER/dover.yml")),
@@ -95,6 +98,7 @@ def load_config(path: str | Path | None) -> AppConfig:
             repetition_penalty=float(qwen_raw.get("repetition_penalty", 1.0)),
             presence_penalty=float(qwen_raw.get("presence_penalty", 0.0)),
             seed=int(qwen_raw.get("seed", raw.get("seed", 42))),
+            decode_workers=int(qwen_raw.get("decode_workers", 1)),
             batch_size=int(qwen_raw.get("batch_size", 8)),
             attn_implementation=str(qwen_raw.get("attn_implementation", "auto")),
             backend=str(qwen_raw.get("backend", "vllm")),

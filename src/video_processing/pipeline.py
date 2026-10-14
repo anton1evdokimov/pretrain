@@ -465,8 +465,16 @@ def _load_qwen(qwen, cfg: AppConfig, *, overlapped: bool) -> None:
 
 
 # [43] Кадры следующего батча Qwen, пока текущий ещё считается. Зовёт [44].
+# qwen.decode_workers > 1 — ролики пачки декодируются параллельно, по одному потоку ffmpeg.
 def _prepare_batch(qwen: QwenCaptioner, batch: list[tuple[int, Path]]):
-    return [(path, qwen.prepare_frames(path)) for _, path in batch]
+    paths = [path for _, path in batch]
+    workers = max(1, min(int(qwen.cfg.decode_workers), len(paths)))
+    if workers == 1:
+        frames = [qwen.prepare_frames(path) for path in paths]
+    else:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="qwen-decode") as pool:
+            frames = list(pool.map(qwen.prepare_frames, paths))
+    return list(zip(paths, frames))
 
 
 # [56] Среднее с/видео по замерам после warmup.

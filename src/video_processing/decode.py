@@ -72,7 +72,12 @@ def _resize_rgb(rgb: np.ndarray, max_side: int) -> np.ndarray:
 
 
 # [46] Кадры Qwen через тот же ffmpeg [34]. При обрыве pipe — [46a].
-def sample_rgb_frames(path: Path, indices: np.ndarray, max_side: int | None = None) -> dict[int, np.ndarray]:
+def sample_rgb_frames(
+    path: Path,
+    indices: np.ndarray,
+    max_side: int | None = None,
+    ffmpeg_threads: int = 0,
+) -> dict[int, np.ndarray]:
     """Decode only the requested frames, keeping at most one full-res frame in RAM."""
     needed = {int(i) for i in indices.tolist()}
     if not needed:
@@ -83,7 +88,9 @@ def sample_rgb_frames(path: Path, indices: np.ndarray, max_side: int | None = No
         meta = probe_video(path)
         width, height = int(meta["width"]), int(meta["height"])
         if width > 0 and height > 0:
-            for idx, rgb in _iter_ffmpeg_rgb(path, ordered, width, height, ffmpeg_threads=0):
+            for idx, rgb in _iter_ffmpeg_rgb(
+                path, ordered, width, height, ffmpeg_threads=ffmpeg_threads
+            ):
                 if max_side is not None:
                     rgb = _resize_rgb(rgb, max_side)
                 captured[idx] = rgb

@@ -5,14 +5,18 @@ warmup_videos: 4
 seed: 42
 # DOVER и Qwen одновременно: vLLM берёт 50% VRAM, DOVER живёт в остатке.
 parallel: true
+# Пул потоков torch и OpenCV на процесс; 0 — не трогать (по числу ядер).
+# Тензорные операции идут сразу из многих воркеров декода, и пулы по числу ядер
+# в каждом дают переподписку: в vmstat sy > us и до 1.2 млн переключений/с.
+cpu_threads: 2
 
 dover:
   weights: weights/DOVER.pth
   config: third_party/DOVER/dover.yml
   device: auto
   batch_size: 8
-  # По одному ffmpeg на ролик в батче.
-  decode_workers: 8
+  # Непрерывный пул ffmpeg по одному потоку. С 8 воркерами CPU простаивал на ~2/3.
+  decode_workers: 16
 
 qwen:
   model_id: Qwen/Qwen3-VL-2B-Instruct
@@ -30,6 +34,9 @@ qwen:
   presence_penalty: 0.0
   # Фиксированный seed запроса: при temperature > 0 подписи воспроизводимы, A/B честный.
   seed: 42
+  # Роликов пачки, которые готовятся к Qwen параллельно. 1 — по одному, как раньше
+  # (~170 из 217 с этапа Qwen уходило на эту подготовку).
+  decode_workers: 8
   batch_size: 32
   attn_implementation: auto
   # При parallel: true пайплайн сам режет долю до 0.55, чтобы рядом жил DOVER.

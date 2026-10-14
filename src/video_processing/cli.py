@@ -49,9 +49,15 @@ def main() -> None:
 
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
+    if cfg.cpu_threads > 0:
+        import cv2
+
+        cv2.setNumThreads(cfg.cpu_threads)
     try:
         import torch
 
+        if cfg.cpu_threads > 0:
+            torch.set_num_threads(cfg.cpu_threads)
         torch.manual_seed(cfg.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(cfg.seed)

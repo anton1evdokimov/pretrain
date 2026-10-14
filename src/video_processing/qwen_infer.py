@@ -91,7 +91,10 @@ class QwenCaptioner:
     def prepare_frames(self, path: Path) -> list[Image.Image]:
         meta = probe_video(path)
         indices = uniform_indices(meta["nb_frames"], self.cfg.num_frames)
-        captured = sample_rgb_frames(path, indices, max_side=self.cfg.max_side)
+        threads = 1 if self.cfg.decode_workers > 1 else 0
+        captured = sample_rgb_frames(
+            path, indices, max_side=self.cfg.max_side, ffmpeg_threads=threads
+        )
         return frames_as_pil(captured, indices)
 
     # Ветка transformers: один ролик через caption_batch.
