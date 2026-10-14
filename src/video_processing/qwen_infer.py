@@ -112,7 +112,9 @@ class QwenCaptioner:
         if self._model is None or self._processor is None:
             self.load()
         prompt = self.cfg.prompt or USER_PROMPT
-        messages_batch = [_messages(images, prompt) for _, images in items]
+        messages_batch = [
+            _messages(images, prompt, self.cfg.system_prompt) for _, images in items
+        ]
         inputs = _prepare_inputs(self._processor, messages_batch)
         inputs = _to_device(inputs, self._model.device)
         generate_kwargs = {
@@ -167,10 +169,13 @@ def _attn_candidates(requested: str, device: str) -> list[str | None]:
 
 
 # Ветка transformers: кадры и промпт в формате чата.
-def _messages(images: list[Image.Image], prompt: str) -> list[dict]:
+def _messages(images: list[Image.Image], prompt: str, system: str = "") -> list[dict]:
     content = [{"type": "image", "image": image} for image in images]
     content.append({"type": "text", "text": prompt})
-    return [{"role": "user", "content": content}]
+    messages = [{"role": "user", "content": content}]
+    if system:
+        messages.insert(0, {"role": "system", "content": [{"type": "text", "text": system}]})
+    return messages
 
 
 # Ветка transformers: токены и пиксели пачки.

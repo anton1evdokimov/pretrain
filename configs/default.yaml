@@ -24,6 +24,8 @@ dover:
 qwen:
   model_id: Qwen/Qwen3-VL-2B-Instruct
   prompt: "Сгенерируй детальное описание всего, что происходит на видео"
+  # Системное сообщение перед prompt; сам prompt уходит дословно. Пусто — без него.
+  system_prompt: ""
   num_frames: 8
   max_side: 384
   # 512 обрезал 9 из 10 описаний, 1024 — 6 из 8 копий 3.mp4 (430 слов, без повторов).
@@ -52,14 +54,15 @@ qwen:
   decode_workers: 8
   # true — без пачек: каждый ролик «кадры → запрос» сам по себе, в vLLM до
   # max_num_seqs запросов. false — пачки по batch_size, пачка ждёт самый длинный ответ.
-  continuous: false
+  # Вместе с max_num_seqs 64: весь прогон 60 → 50 с, качество как было (results_v10).
+  continuous: true
   batch_size: 32
   attn_implementation: auto
   # При parallel: true пайплайн сам режет долю до 0.55, чтобы рядом жил DOVER.
   backend: vllm
   dtype: bfloat16
   max_model_len: 4096
-  max_num_seqs: 32
+  max_num_seqs: 64
   gpu_memory_utilization: 0.90
   port: 8000
   api_base: ""

@@ -60,6 +60,7 @@ def main() -> None:
     print("\n" + "metric".ljust(26) + "".join(n.rjust(width) for n in names))
     for key, default in (("dover_decoder", "cpu"), ("qwen_decoder", "cpu"), ("qwen_input", "images")):
         print(key.ljust(26) + "".join(str(runs[n]["config"].get(key, default)).rjust(width) for n in names))
+    print("system_prompt".ljust(26) + "".join(("да" if runs[n]["config"].get("qwen_system_prompt") else "нет").rjust(width) for n in names))
     for key in THROUGHPUT:
         print(key.ljust(26) + "".join(str(runs[n]["throughput"].get(key, "—")).rjust(width) for n in names))
     # Пачками: остаток этапа Qwen сверх вызовов vLLM — ожидание кадров и первая пачка.

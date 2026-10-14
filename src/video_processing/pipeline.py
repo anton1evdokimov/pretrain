@@ -312,6 +312,7 @@ def run_pipeline(
         "config": {
             "qwen_input": cfg.qwen.input,
             "qwen_decoder": cfg.qwen.decoder,
+            "qwen_system_prompt": cfg.qwen.system_prompt,
             "dover_decoder": cfg.dover.decoder,
             "replicate": cfg.replicate,
             "warmup_videos": cfg.warmup_videos,

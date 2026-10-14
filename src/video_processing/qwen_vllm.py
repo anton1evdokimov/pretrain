@@ -189,9 +189,12 @@ class VllmCaptioner:
                     {"type": "image_url", "image_url": {"url": _jpeg_data_url(image)}}
                 )
         content.append({"type": "text", "text": self.cfg.prompt})
+        messages = [{"role": "user", "content": content}]
+        if self.cfg.system_prompt:
+            messages.insert(0, {"role": "system", "content": self.cfg.system_prompt})
         payload = {
             "model": self.cfg.model_id,
-            "messages": [{"role": "user", "content": content}],
+            "messages": messages,
             "max_tokens": self.cfg.max_tokens,
             "temperature": self.cfg.temperature,
             "repetition_penalty": self.cfg.repetition_penalty,

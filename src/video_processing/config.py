@@ -23,6 +23,7 @@ class DoverConfig:
 class QwenConfig:
     model_id: str
     prompt: str
+    system_prompt: str = ""
     num_frames: int = 8
     max_side: int = 384
     max_tokens: int = 256
@@ -96,6 +97,7 @@ def load_config(path: str | Path | None) -> AppConfig:
                     "Сгенерируй детальное описание всего, что происходит на видео",
                 )
             ),
+            system_prompt=str(qwen_raw.get("system_prompt") or "").strip(),
             num_frames=int(qwen_raw.get("num_frames", 8)),
             max_side=int(qwen_raw.get("max_side", 384)),
             max_tokens=int(qwen_raw.get("max_tokens", 256)),
