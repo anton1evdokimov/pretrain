@@ -41,14 +41,18 @@ qwen:
   seed: 42
   # images — 8 отдельных картинок. video — те же кадры одним роликом с метками времени:
   # без перечисления «Кадр N», но в 2–4 раза короче и с выдуманным текстом на 8 кадрах,
-  # соседние кадры склеиваются попарно (results_v7).
+  # соседние кадры склеиваются попарно (results_v7). 16 кадров видео — ещё хуже:
+  # 1.mp4 зациклен в 14 из 16 копий, остальные по 35–160 слов (results_v9).
   input: images
-  # Кадры Qwen: cpu — ffmpeg, nvdec — torchcodec на GPU. С NVDEC у DOVER этап Qwen
-  # половину времени ждёт кадры от ffmpeg (results_v6: 43 с из 85).
-  decoder: cpu
+  # Кадры Qwen: cpu — ffmpeg, nvdec — torchcodec на GPU. Ожидание кадров 43 → 11 с,
+  # весь прогон 85.5 → 60 с (results_v6 → results_v8).
+  decoder: nvdec
   # Роликов пачки, которые готовятся к Qwen параллельно. 1 — по одному, как раньше.
   # 8 сократили этап Qwen с 217 до 136 с (results_v4).
   decode_workers: 8
+  # true — без пачек: каждый ролик «кадры → запрос» сам по себе, в vLLM до
+  # max_num_seqs запросов. false — пачки по batch_size, пачка ждёт самый длинный ответ.
+  continuous: false
   batch_size: 32
   attn_implementation: auto
   # При parallel: true пайплайн сам режет долю до 0.55, чтобы рядом жил DOVER.

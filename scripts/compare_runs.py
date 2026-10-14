@@ -62,12 +62,20 @@ def main() -> None:
         print(key.ljust(26) + "".join(str(runs[n]["config"].get(key, default)).rjust(width) for n in names))
     for key in THROUGHPUT:
         print(key.ljust(26) + "".join(str(runs[n]["throughput"].get(key, "—")).rjust(width) for n in names))
-    # Остаток этапа Qwen сверх вызовов vLLM — ожидание кадров и первая пачка.
-    for label, fn in (
-        ("qwen_vllm_calls_sec", lambda t: t["qwen_sec_per_video"] * (t["processed_jobs"] - t["warmup_videos"])),
-        ("qwen_waiting_sec", lambda t: t["qwen_stage_sec"] - t["qwen_sec_per_video"] * (t["processed_jobs"] - t["warmup_videos"])),
-    ):
-        print(label.ljust(26) + "".join(f"{fn(runs[n]['throughput']):.1f}".rjust(width) for n in names))
+    # Пачками: остаток этапа Qwen сверх вызовов vLLM — ожидание кадров и первая пачка.
+    # Непрерывно: средние на ролик — кадры и запрос (задержка, не пропускная способность).
+    def _calls(t):
+        return t["qwen_sec_per_video"] * (t["processed_jobs"] - t["warmup_videos"])
+
+    rows = (
+        ("qwen_vllm_calls_sec", lambda t: None if t.get("qwen_continuous") else _calls(t)),
+        ("qwen_waiting_sec", lambda t: None if t.get("qwen_continuous") else t["qwen_stage_sec"] - _calls(t)),
+        ("qwen_prep_sec_mean", lambda t: t.get("qwen_prep_sec_mean")),
+        ("qwen_request_sec_mean", lambda t: t.get("qwen_request_sec_mean")),
+    )
+    for label, fn in rows:
+        cells = [fn(runs[n]["throughput"]) for n in names]
+        print(label.ljust(26) + "".join(("—" if c is None else f"{c:.2f}").rjust(width) for c in cells))
 
     stats = {n: _stats(runs[n]) for n in names}
     videos = sorted({v for s in stats.values() for v in s}, key=lambda v: int(Path(v).stem) if Path(v).stem.isdigit() else v)

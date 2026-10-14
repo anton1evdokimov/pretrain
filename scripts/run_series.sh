@@ -2,8 +2,8 @@
 # Прогоны по очереди, у каждого свой vmstat, stderr и лог vLLM в logs/.
 # Не одновременно: все делят один GPU, и скорости были бы несравнимы.
 #
-#   bash scripts/run_series.sh v8 configs/v8_qwen_nvdec.yaml v9 configs/v9_video16.yaml
-#   В конце — compare_runs по results_v6 и всем запущенным.
+#   bash scripts/run_series.sh v10 configs/v10_continuous.yaml
+#   В конце — compare_runs по базе (BASE, по умолчанию results_v8) и всем запущенным.
 set -u
 cd "$(dirname "$0")/.."
 mkdir -p logs
@@ -20,7 +20,7 @@ run() {
   echo "$name: exit=$code, NVDEC → cpu: $(grep -c 'NVDEC:' "logs/${name}_stderr.txt")"
 }
 
-dirs=(results_v6)
+dirs=("${BASE:-results_v8}")
 while [ $# -ge 2 ]; do
   run "$1" "$2"
   dirs+=("results_$1")

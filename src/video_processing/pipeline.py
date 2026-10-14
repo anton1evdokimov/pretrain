@@ -5,7 +5,7 @@ import json
 import statistics
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -443,7 +443,64 @@ def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
             prefetch.shutdown(wait=False)
             overlap["qwen_stage_sec"] = time.perf_counter() - stage_t0
 
-    qwen_thread = threading.Thread(target=consume, name="qwen-overlap")
+    # [25c] Поток Qwen без пачек: каждый ролик — своя задача «кадры → запрос».
+    # Готовая подпись сразу освобождает место следующему ролику, длинное описание
+    # не держит пустыми остальные слоты vLLM. Кадры готовят не больше
+    # decode_workers задач одновременно, запросов в полёте до max_num_seqs + decode_workers.
+    def consume_continuous() -> None:
+        inflight = max(1, int(cfg.qwen.max_num_seqs))
+        workers = max(1, int(cfg.qwen.decode_workers))
+        prep_slots = threading.Semaphore(workers)
+        prep_sec: list[float] = []
+        request_sec: list[float] = []
+
+        def task(path: Path):
+            with prep_slots:
+                t0 = time.perf_counter()
+                frames = qwen.prepare_frames(path)
+                t1 = time.perf_counter()
+            text, finish, tokens = qwen.caption_one(path, frames)
+            return text, finish, tokens, t1 - t0, time.perf_counter() - t1
+
+        pool = ThreadPoolExecutor(max_workers=inflight + workers, thread_name_prefix="qwen-req")
+        stage_t0 = last = time.perf_counter()
+        bar = tqdm(total=len(jobs), desc="Qwen3-VL", position=1)
+        n_done = 0
+        try:
+            futures = {pool.submit(task, path): index for index, (_, path) in enumerate(jobs)}
+            for fut in as_completed(futures):
+                if stop.is_set():
+                    break
+                index = futures[fut]
+                copy, path = jobs[index]
+                text, finish, tokens, t_prep, t_req = fut.result()
+                now = time.perf_counter()
+                if n_done >= cfg.warmup_videos:
+                    qwen_times.append(now - last)
+                last = now
+                prep_sec.append(t_prep)
+                request_sec.append(t_req)
+                truncated[0] += finish == "length"
+                caption_records.append(_caption_record(index, copy, path, text, finish, tokens))
+                if copy == 0 and path.name not in captions:
+                    captions[path.name] = (text, finish, t_req)
+                n_done += 1
+                bar.update(1)
+                _mark("qwen", [index], now)
+        except BaseException as exc:
+            errors.append(exc)
+            stop.set()
+        finally:
+            pool.shutdown(wait=not stop.is_set(), cancel_futures=True)
+            bar.close()
+            overlap["qwen_stage_sec"] = time.perf_counter() - stage_t0
+            overlap["qwen_prep_sec_mean"] = _mean(prep_sec)
+            overlap["qwen_request_sec_mean"] = _mean(request_sec)
+
+    continuous = cfg.qwen.continuous and getattr(qwen, "concurrent", False)
+    qwen_thread = threading.Thread(
+        target=consume_continuous if continuous else consume, name="qwen-overlap"
+    )
     dover_thread = threading.Thread(target=produce, name="dover-overlap")
     load_sec: dict[str, float] = {}
     try:
@@ -509,6 +566,9 @@ def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
             "makespan_sec": (max(t for t, _ in events) - run_t0) if events else 0.0,
             "dover_end_sec": last_mark.get("dover", run_t0) - run_t0,
             "qwen_end_sec": last_mark.get("qwen", run_t0) - run_t0,
+            "qwen_continuous": continuous,
+            "qwen_prep_sec_mean": overlap.get("qwen_prep_sec_mean"),
+            "qwen_request_sec_mean": overlap.get("qwen_request_sec_mean"),
         },
     }
 
@@ -592,7 +652,11 @@ def _throughput_stats(
             "makespan_sec": round(float(overlap.get("makespan_sec") or 0.0), 3),
             "dover_end_sec": round(float(overlap.get("dover_end_sec") or 0.0), 3),
             "qwen_end_sec": round(float(overlap.get("qwen_end_sec") or 0.0), 3),
+            "qwen_continuous": bool(overlap.get("qwen_continuous")),
         }
+        if overlap.get("qwen_continuous"):
+            extra["qwen_prep_sec_mean"] = round(float(overlap["qwen_prep_sec_mean"] or 0.0), 3)
+            extra["qwen_request_sec_mean"] = round(float(overlap["qwen_request_sec_mean"] or 0.0), 3)
     return {
         "device": device,
         "gpu": gpu_name(),

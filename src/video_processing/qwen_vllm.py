@@ -157,6 +157,10 @@ class VllmCaptioner:
         images = frames if frames is not None else self.prepare_frames(path)
         return self.caption_batch([(path, images)])[0][0]
 
+    # [49c] Один ролик без пачки: непрерывная подача [25c] держит vLLM полным.
+    def caption_one(self, path: Path, frames: list[Image.Image]) -> tuple[str, str, int]:
+        return self._caption_one((path, frames))
+
     # [49] До 32 запросов [50] параллельно. Слоты пакует уже vLLM.
     # Каждый элемент — (текст, finish_reason, токенов промпта); "length" — обрезано по max_tokens.
     def caption_batch(
