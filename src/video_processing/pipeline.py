@@ -696,11 +696,18 @@ def _natural_key(name: str) -> tuple:
 def _write_markdown(path: Path, payload: dict) -> None:
     t = payload["throughput"]
     gpu = t.get("gpu") or t.get("device")
+    attn = t.get("attn_implementation")
+    if attn == "vllm":
+        engine = "Inference engine: **vLLM**."
+    elif attn:
+        engine = f"Inference engine: **transformers** (`{attn}`)."
+    else:
+        engine = "Inference engine: неизвестен."
     overlapped = bool(t.get("overlapped"))
     rows = [
         "# Результаты Video Processing",
         "",
-        f"Устройство: **{gpu}**. Attention: `{t.get('attn_implementation')}`.",
+        f"Устройство: **{gpu}**. {engine}",
         "",
         "## Пропускная способность",
         "",

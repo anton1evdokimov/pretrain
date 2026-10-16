@@ -1,6 +1,6 @@
 # Результаты Video Processing
 
-Устройство: **NVIDIA A100 80GB PCIe**. Attention: `vllm`.
+Устройство: **NVIDIA A100 80GB PCIe**. Inference engine: **vLLM**.
 
 ## Пропускная способность (после warmup)
 
