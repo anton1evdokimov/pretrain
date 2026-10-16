@@ -1,7 +1,7 @@
 {
   "device": "cuda",
   "gpu": "NVIDIA A100 80GB PCIe",
-  "attn_implementation": "vllm",
+  "engine": "vllm",
   "overlapped": true,
   "unique_videos": 10,
   "processed_jobs": 640,

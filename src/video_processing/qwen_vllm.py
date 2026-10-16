@@ -1,12 +1,3 @@
-"""Qwen captions through a local vLLM server.
-
-The pipeline starts the server before DOVER so both stay resident: vLLM
-keeps a slice of VRAM and DOVER uses the rest. Continuous batching is the
-part that helps:
-inside one chunk, a short caption frees its slot instead of holding the
-whole static batch.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -25,7 +16,12 @@ from pathlib import Path
 from PIL import Image
 
 from video_processing.config import ROOT, QwenConfig
-from video_processing.decode import frames_as_pil, probe_video, sample_qwen_frames, uniform_indices
+from video_processing.decode import (
+    frames_as_pil,
+    probe_video,
+    sample_qwen_frames,
+    uniform_indices,
+)
 from video_processing.device import pick_torch_device
 
 
@@ -34,8 +30,7 @@ from video_processing.device import pick_torch_device
 def vllm_serve_command(cfg: QwenConfig, gpu_memory_utilization: float | None = None) -> list[str]:
     seqs = max(int(cfg.max_num_seqs), int(cfg.batch_size), 1)
     util = cfg.gpu_memory_utilization if gpu_memory_utilization is None else gpu_memory_utilization
-    # Startup profiles the vision encoder at processor max_pixels. Qwen's
-    # default is millions of pixels per frame and OOMs the engine before /health.
+   # Bound max_pixels to avoid OOM during vLLM startup profiling.
     pixels = max(int(cfg.max_side) * int(cfg.max_side), 4096)
     video = cfg.input == "video"
     if video:
@@ -67,7 +62,7 @@ def vllm_serve_command(cfg: QwenConfig, gpu_memory_utilization: float | None = N
         "0",
         # Копии replicate побайтно совпадают: с prefix cache их prefill и vision
         # encoder берутся из кэша, и видео/с Qwen завышается. У уникальных роликов
-        # общий префикс — только шаблон чата, так что в бою кэш ничего не даёт.
+        # общий префикс — только шаблон чата
         "--no-enable-prefix-caching",
         "--trust-remote-code",
         "--host",
@@ -84,7 +79,8 @@ class VllmCaptioner:
     def __init__(self, cfg: QwenConfig, device: str = "auto"):
         self.cfg = cfg
         self.device = pick_torch_device(device)
-        self.attn_implementation = "vllm"
+        self.engine = "vllm"
+        self.attn_implementation = None
         self._proc: subprocess.Popen | None = None
         self._log = None
         self._log_path = ROOT / "logs" / "vllm-serve.log"
@@ -168,8 +164,6 @@ class VllmCaptioner:
             return list(pool.map(self._caption_one, items))
 
     # [50] JPEG кадров [51] и POST [52]. Системное сообщение, temperature, штрафы и seed — отсюда.
-    # input: video — те же кадры одним роликом video/jpeg: Qwen3-VL склеивает их
-    # попарно и ставит метки времени. fps vLLM для такой последовательности — 1.
     def _caption_one(self, item: tuple[Path, list[Image.Image]]) -> tuple[str, str, int]:
         _, images = item
         content: list[dict] = []

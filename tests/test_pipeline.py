@@ -19,9 +19,9 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from video_processing import pipeline  # noqa: E402
-from video_processing.config import load_config  # noqa: E402
-from video_processing.dover_infer import dover_z, fuse_results  # noqa: E402
+from video_processing import pipeline
+from video_processing.config import load_config
+from video_processing.dover_infer import dover_z, fuse_results
 
 
 class FakeDover:
@@ -47,7 +47,8 @@ class FakeDover:
 
 class FakeQwen:
     concurrent = True
-    attn_implementation = "fake"
+    engine = "vllm"
+    attn_implementation = None
     device = "cpu"
 
     def __init__(self, cfg, device="auto"):

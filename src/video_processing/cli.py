@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import os
 
-# Before the CUDA caching allocator starts. DOVER's batch-16 activation is one
-# ~11 GiB block; without this, PyTorch holds that much in fragments and the
-# new block fails even though the sum of free cache would cover it.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
+
+# Задаём настройку CUDA allocator до инициализации CUDA.
+# expandable_segments может уменьшить фрагментацию при крупных аллокациях
+# переменного размера, например при обработке батчей DOVER.
 _alloc = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
 if "expandable_segments" not in _alloc:
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (
@@ -16,6 +19,7 @@ import random
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from video_processing.config import load_config
 from video_processing.device import configure_cuda
@@ -31,9 +35,6 @@ def main() -> None:
     parser.add_argument("--replicate", type=int, default=None)
     args = parser.parse_args()
 
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
-
     cfg = load_config(args.config)
     if args.input:
         cfg.input_dir = Path(args.input).expanduser().resolve()
@@ -48,23 +49,21 @@ def main() -> None:
         import cv2
 
         cv2.setNumThreads(cfg.cpu_threads)
-    try:
-        import torch
-
-        if cfg.cpu_threads > 0:
-            torch.set_num_threads(cfg.cpu_threads)
-        torch.manual_seed(cfg.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(cfg.seed)
-            configure_cuda()
-    except Exception:
-        pass
+        torch.set_num_threads(cfg.cpu_threads)
+        
+    torch.manual_seed(cfg.seed)
+    torch.cuda.manual_seed_all(cfg.seed)
+    
+    configure_cuda()
 
     payload = run_pipeline(cfg)
     t = payload["throughput"]
     print("\n=== throughput (stable) ===")
+    engine = t.get("engine")
+    if engine == "vllm":
+        engine = "vLLM"
     print(f"gpu:        {t.get('gpu') or t.get('device')}")
-    print(f"attn:       {t.get('attn_implementation')}")
+    print(f"engine:     {engine}")
     print(f"videos/sec: {t['videos_per_sec']:.4f}")
     print(f"sec/video:  {t['pipeline_sec_per_video']:.3f}")
     print(f"DOVER:      {t['dover_sec_per_video']:.3f} s")

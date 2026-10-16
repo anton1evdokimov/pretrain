@@ -62,7 +62,7 @@ class DoverScorer:
 
         model = DOVER(**opt["model"]["args"])
         state = torch.load(weights, map_location="cpu", weights_only=False)
-        model.load_state_dict(state, strict=False)
+        model.load_state_dict(state, strict=True)
         model.eval()
         for module in model.modules():
             if hasattr(module, "use_checkpoint"):
@@ -74,22 +74,6 @@ class DoverScorer:
     def unload(self) -> None:
         self._model = None
         release_memory()
-
-    # Один ролик через [27]. Основной прогон идёт через [27s].
-    def score(self, path: Path) -> dict[str, float]:
-        return self.score_batch([path])[0]
-
-    # [27] Пачка вне основного прогона: подготовка [28p] в пуле, затем один forward [37f].
-    def score_batch(self, paths: list[Path]) -> list[dict[str, float]]:
-        if self._model is None:
-            self.load()
-        workers = self._decode_workers(len(paths))
-        if workers == 1:
-            prepared = [self.prepare(path, ffmpeg_threads=0) for path in paths]
-        else:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                prepared = list(pool.map(self.prepare, paths))
-        return self.score_prepared(prepared)
 
     # [27s] Поток пачек для основного прогона. Декод идёт в пуле без барьера на
     # границе батча: длинный ролик не держит остальные воркеры, пачка собирается
@@ -222,7 +206,7 @@ class DoverScorer:
         root = str(dover_root)
         if root not in sys.path:
             sys.path.insert(0, root)
-        # Official dover/__init__.py imports datasets → decord. We only need the model.
+        # Официальный dover/__init__.py импортирует datasets → decord. Нам нужна только модель.
         pkg = types.ModuleType("dover")
         pkg.__path__ = [str(pkg_dir)]
         pkg.__file__ = str(pkg_dir / "__init__.py")

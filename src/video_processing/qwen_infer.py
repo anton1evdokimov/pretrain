@@ -6,23 +6,27 @@ import torch
 from PIL import Image
 
 from video_processing.config import QwenConfig
-from video_processing.decode import frames_as_pil, probe_video, sample_qwen_frames, uniform_indices
+from video_processing.decode import (
+    frames_as_pil,
+    probe_video,
+    sample_qwen_frames,
+    uniform_indices,
+)
 from video_processing.device import pick_torch_device, release_memory, sync
-
 
 USER_PROMPT = "Сгенерируй детальное описание всего, что происходит на видео"
 
 
-# [10] backend=vllm → [11]. transformers — отдельная ветка, в текущем прогоне не идёт.
+# [10] Фабрика captioner: vLLM или Transformers.
 def make_captioner(cfg: QwenConfig, device: str = "auto"):
     if cfg.backend == "vllm":
         from video_processing.qwen_vllm import VllmCaptioner
 
         return VllmCaptioner(cfg, device=device)
     if cfg.backend not in ("transformers", "hf", ""):
-        raise ValueError(f"неизвестный qwen.backend: {cfg.backend}")
+        raise ValueError(f"Неизвестный qwen.backend: {cfg.backend!r}")
     if cfg.input != "images":
-        raise ValueError(f"qwen.input: {cfg.input} есть только у backend: vllm")
+        raise ValueError(f"qwen.input={cfg.input!r} поддерживается только backend='vllm'")
     return QwenCaptioner(cfg, device=device)
 
 
@@ -34,6 +38,7 @@ class QwenCaptioner:
         self._model = None
         self._processor = None
         self.dtype = None
+        self.engine = "transformers"
         self.attn_implementation = None
 
     # Ветка transformers: грузит Qwen3-VL в этот процесс.

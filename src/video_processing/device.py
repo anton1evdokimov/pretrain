@@ -3,6 +3,8 @@ from __future__ import annotations
 import gc
 import os
 
+import torch
+
 
 # [9] cuda, если карта есть. Иначе mps или cpu. Зовут [8] и [11].
 def pick_torch_device(requested: str = "auto") -> str:
@@ -19,18 +21,13 @@ def pick_torch_device(requested: str = "auto") -> str:
 
 
 # [4] TF32 и cudnn.benchmark для фиксированных шейпов DOVER. Из [1], до прогона.
-def configure_cuda() -> None:
-    import torch
-
+def configure_cuda() -> None:    
     if not torch.cuda.is_available():
         return
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
-    try:
-        torch.set_float32_matmul_precision("high")
-    except Exception:
-        pass
+    torch.set_float32_matmul_precision("high")
 
 
 # [38] cuda.synchronize после forward DOVER, чтобы замер не убегал вперёд.

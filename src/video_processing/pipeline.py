@@ -18,7 +18,6 @@ from video_processing.device import gpu_name, release_memory, sync
 from video_processing.dover_infer import DoverScorer, dover_z
 from video_processing.qwen_infer import QwenCaptioner, make_captioner
 
-
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 
 # Порядок основного прогона с configs/default.yaml (parallel, vLLM, NVDEC, continuous).
@@ -270,6 +269,7 @@ def run_pipeline(cfg: AppConfig, *, write_outputs: bool = True) -> dict:
         dover_stage_sec=dover_stage_sec,
         qwen_stage_sec=qwen_stage_sec,
         device=dover.device,
+        engine=getattr(qwen, "engine", None) or cfg.qwen.backend,
         attn=qwen.attn_implementation,
         overlapped=overlapped,
         overlap=overlap_info,
@@ -303,12 +303,15 @@ def run_pipeline(cfg: AppConfig, *, write_outputs: bool = True) -> dict:
             "dover_batch_size": cfg.dover.batch_size,
             "device": dover.device,
             "gpu": gpu_name(),
-            "attn_implementation": qwen.attn_implementation,
+            "engine": getattr(qwen, "engine", None) or cfg.qwen.backend,
         },
         "dover_scores": dover_scores,
         "dover_times": dover_times,
         "dover_stage_sec": dover_stage_sec,
     }
+    attn = qwen.attn_implementation
+    if attn and attn != "vllm":
+        payload["config"]["attn_implementation"] = attn
     if write_outputs:
         _write_outputs(cfg.output_dir, payload)
     release_memory()
@@ -589,6 +592,7 @@ def _throughput_stats(
     dover_stage_sec: float,
     qwen_stage_sec: float,
     device: str,
+    engine: str | None,
     attn: str | None,
     overlapped: bool = False,
     overlap: dict | None = None,
@@ -640,10 +644,10 @@ def _throughput_stats(
         if overlap.get("qwen_continuous"):
             extra["qwen_prep_sec_mean"] = round(float(overlap["qwen_prep_sec_mean"] or 0.0), 3)
             extra["qwen_request_sec_mean"] = round(float(overlap["qwen_request_sec_mean"] or 0.0), 3)
-    return {
+    stats = {
         "device": device,
         "gpu": gpu_name(),
-        "attn_implementation": attn,
+        "engine": engine,
         "overlapped": overlapped,
         "unique_videos": n_unique,
         "processed_jobs": n_jobs,
@@ -661,6 +665,9 @@ def _throughput_stats(
         "captions_truncated_jobs": qwen_truncated,
         "note": note,
     }
+    if attn and attn != "vllm":
+        stats["attn_implementation"] = attn
+    return stats
 
 
 # [57] results.json, results.csv, throughput.json, captions_all.jsonl и [58].
@@ -696,11 +703,18 @@ def _natural_key(name: str) -> tuple:
 def _write_markdown(path: Path, payload: dict) -> None:
     t = payload["throughput"]
     gpu = t.get("gpu") or t.get("device")
+    engine_name = t.get("engine")
     attn = t.get("attn_implementation")
-    if attn == "vllm":
+    if engine_name == "vllm":
         engine = "Inference engine: **vLLM**."
-    elif attn:
-        engine = f"Inference engine: **transformers** (`{attn}`)."
+    elif engine_name in ("transformers", "hf"):
+        engine = (
+            f"Inference engine: **transformers** (`{attn}`)."
+            if attn
+            else "Inference engine: **transformers**."
+        )
+    elif engine_name:
+        engine = f"Inference engine: **{engine_name}**."
     else:
         engine = "Inference engine: неизвестен."
     overlapped = bool(t.get("overlapped"))
@@ -755,9 +769,7 @@ def _write_markdown(path: Path, payload: dict) -> None:
         "",
         "## Оценки и описания (копия 0)",
         "",
-        "Technical, aesthetic и overall — сигмоида от z относительно калибровки DOVER, "
-        "как в официальном коде. При |z| больше 3 шкала `[0, 1]` насыщается, и ролики "
-        "различаются только по z.",
+        "Technical, aesthetic и overall — сигмоида от z относительно калибровки DOVER, как в официальном коде",
         "",
         "| Видео | Technical | Aesthetic | Overall | Technical z | Aesthetic z | Описание |",
         "|---|---:|---:|---:|---:|---:|---|",

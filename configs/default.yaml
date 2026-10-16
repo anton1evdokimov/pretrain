@@ -67,6 +67,7 @@ qwen:
   # Вместе с max_num_seqs 64: весь прогон 60 → 50 с, качество то же (results_v10).
   continuous: true
   batch_size: 32
+  # Только backend: transformers (sdpa / flash_attention_2). vLLM этот ключ не читает.
   attn_implementation: auto
   # При parallel: true пайплайн сам режет долю до 0.50 (OVERLAP_VLLM_FRACTION), чтобы рядом жил DOVER.
   backend: vllm
