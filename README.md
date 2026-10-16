@@ -1,13 +1,13 @@
 # Video Processing
 
-Пайплайн для одной NVIDIA A100. На каждом ролике две модели:
+Пайплайн для пакетной обработки видео на одной NVIDIA A100 80 ГБ. Для каждого ролика параллельно выполняются две задачи:
 
-1. **DOVER** — техническое и эстетическое качество, плюс общая оценка. Шкала `[0, 1]`, fusion как в официальном `evaluate_a_set_of_videos.py` на конфиге `val-l1080p`.
-2. **Qwen3-VL-2B-Instruct** — описание. Промпт задания уходит модели дословно: «Сгенерируй детальное описание всего, что происходит на видео». Перед ним стоит системное сообщение, которое просит писать кратко и без выдумок (см. [Конфиг](#конфиг)).
+1. **DOVER** — оценка технического, эстетического и общего качества по штатному алгоритму предобученной модели.
+2. **Qwen3-VL-2B-Instruct** — генерация текстового описания видео. Используется промпт задания без изменений и системная инструкция, ограничивающая длину ответа и запрещающая выдуманные детали.
 
-**Результат на 10 видео** — [`results_final/RESULTS.md`](results_final/RESULTS.md): technical, aesthetic, overall и описание каждого ролика, плюс скорость. То же в `results.csv` и `results.json`.
+**Результаты**: [`results_final/RESULTS.md`](results_final/RESULTS.md) — technical, aesthetic, overall и описание каждого ролика. То же в `results.csv` и `results.json`.
 
-Скорость на A100 80 ГБ — **3.43 видео/с в установившемся режиме** (около 12 350 видео в час), замер на 640 заданиях (`configs/default.yaml`, вывод в `results_final/`). Загрузка моделей — ещё около 50 с, один раз. Baseline — 0.69 видео/с. Какие подходы рассматривали, как их сгруппировали по влиянию и что реализовали — в [REPORT.md](REPORT.md).
+**Производительность**: **3.43 видео/с** в установившемся режиме на A100 80 ГБ. Замер — 640 заданий: 10 роликов, повторённых 64 раза (`results_final/`, конфиг `configs/default.yaml`). Загрузка моделей около 50 с и в скорость не входит. Baseline — 0.69 видео/с. На произвольном наборе уникальных роликов та же цифра не гарантируется. Методика и сравнение экспериментов — в [REPORT.md](REPORT.md).
 
 ## Запуск
 
@@ -24,6 +24,7 @@ python -m unittest discover tests             # smoke-тест без GPU: за�
 ```
 
 - Другой конфиг: `--config configs/....yaml`. Каталоги и число копий: `--input`, `--output`, `--replicate`.
+- Новый прогон пишет в `output_dir` из конфига (`results/`). Цифры выше взяты из сохранённого прогона `results_final/`.
 - Пайплайн сам поднимает vLLM и сам его гасит. `scripts/serve_qwen.py` нужен, только чтобы посмотреть endpoint вручную. Вместе с пайплайном его не запускать: оба займут порт 8000 и одну и ту же память.
 - Без `torchcodec` или без NVDEC каждый ролик автоматически уходит на ffmpeg на CPU. В stderr при этом пишется `[dover] NVDEC: … → cpu` или `[qwen] NVDEC: … → cpu`. Результат тот же, только медленнее.
 
@@ -34,7 +35,7 @@ python -m unittest discover tests             # smoke-тест без GPU: за�
 3. Запускает обе модели одновременно на одном списке роликов:
    - **DOVER.** Пул потоков готовит ролики без барьера на границе батча. Кадры декодирует NVDEC, виды aesthetic и technical собираются на GPU. Forward идёт батчами по `dover.batch_size`.
    - **Qwen.** Каждый ролик — отдельная задача: 8 кадров через NVDEC, уменьшение до 384 px по длинной стороне, запрос в vLLM. Кадры одновременно готовятся не больше чем для `qwen.decode_workers` роликов, в vLLM одновременно до `max_num_seqs` запросов. Готовая подпись сразу освобождает место следующей.
-4. Считает видео/с по wall-clock (см. [Результаты](#результаты)).
+4. Считает видео/с после прогрева, пока заняты обе стадии (см. [Результаты](#результаты)).
 5. Пишет оценки и описания и останавливает vLLM.
 
 `parallel: false` — сначала весь DOVER, потом Qwen, vLLM берёт `gpu_memory_utilization` из конфига. `qwen.continuous: false` — подача пачками по `qwen.batch_size`, как в baseline.
@@ -67,7 +68,7 @@ python -m unittest discover tests             # smoke-тест без GPU: за�
 
 | Ключ | Значение | Смысл |
 |---|---|---|
-| `replicate`, `warmup_videos` | 16, 4 | Копий набора и сколько первых роликов не входит в видео/с |
+| `replicate`, `warmup_videos` | 64, 64 | Копий набора; первые 64 задания не входят в видео/с |
 | `parallel` | `true` | DOVER и Qwen одновременно, vLLM на 50% VRAM |
 | `dover.decoder` | `nvdec` | `cpu` — ffmpeg и нарезка в Python |
 | `dover.batch_size`, `dover.decode_workers` | 8, 8 | Роликов в forward и одновременно готовящихся роликов |
@@ -104,7 +105,7 @@ vllm serve Qwen/Qwen3-VL-2B-Instruct \
 |---|---|
 | `scripts/run_series.sh name config [name config …]` | Прогоны по очереди, у каждого свои `logs/vmstat_*.txt`, `logs/*_stderr.txt` и лог vLLM. В конце — сравнение с `BASE` (по умолчанию `experiments/results_v11`) |
 | `scripts/compare_runs.py dir_a dir_b …` | Скорость и качество подписей нескольких прогонов рядом |
-| `scripts/dover_parity.py [--decoder nvdec] [--demo]` | Входы и оценки DOVER против официального кода, `--demo` — против z-оценок из README DOVER. Вывод на A100 — `experiments/results_parity_*.txt` |
+| `scripts/dover_parity.py [--decoder nvdec] [--demo]` | Входы и оценки DOVER против официального кода. `--demo` — против z-оценок из README DOVER. Печатает в stdout. Сохранены `experiments/results_parity_videos.txt` и `experiments/results_parity_demo.txt` |
 | `scripts/dover_decode_bench.py` | Только подготовка DOVER: CPU против NVDEC, 1 и 8 потоков |
 | `tests/test_pipeline.py` | Smoke-тест: весь `run_pipeline` с заглушками DOVER и Qwen, обе схемы подачи в Qwen, запись результатов |
 

@@ -601,6 +601,7 @@ def _throughput_stats(
     steady = overlap.get("steady") or {"jobs": 0, "wall": 0.0}
     with_tail = overlap.get("with_tail") or {"jobs": 0, "wall": 0.0}
     extra: dict = {}
+    # Основной замер parallel: окно [42] после warmup и пока заняты обе стадии.
     if overlapped and steady["jobs"] > 0 and steady["wall"] > 0:
         stable_samples = steady["jobs"]
         per_video = steady["wall"] / steady["jobs"]
@@ -609,6 +610,7 @@ def _throughput_stats(
             "стадии идут одновременно: видео/с — wall-clock после прогрева и только "
             "пока заняты оба потока; хвост, где один поток уже закончил, не входит"
         )
+    # То же перекрытие, но steady пуст: прогрев длиннее совместной работы, хвост остаётся в числе.
     elif overlapped and with_tail["jobs"] > 0 and with_tail["wall"] > 0:
         stable_samples = with_tail["jobs"]
         per_video = with_tail["wall"] / with_tail["jobs"]
@@ -617,11 +619,13 @@ def _throughput_stats(
             "ВНИМАНИЕ: окно, где заняты оба потока, короче прогрева; число включает "
             "хвост одной стадии и завышено. Поднимите replicate"
         )
+    # parallel выключен: видео/с из суммы средних стадий после warmup, не из общего wall-clock.
     else:
         stable_samples = min(len(dover_times), len(qwen_times))
         per_video = dover_mean + qwen_mean
         videos_per_sec = (1.0 / per_video) if per_video > 0 else 0.0
         note = "стабильные числа: среднее после warmup, по репликам датасета, cuda.synchronize()"
+    # Поля только для parallel: длина окна, видео/с с хвостом, конец каждой стадии.
     if overlapped:
         tail_vps = with_tail["jobs"] / with_tail["wall"] if with_tail["wall"] > 0 else 0.0
         extra = {
@@ -632,6 +636,7 @@ def _throughput_stats(
             "qwen_end_sec": round(float(overlap.get("qwen_end_sec") or 0.0), 3),
             "qwen_continuous": bool(overlap.get("qwen_continuous")),
         }
+        # Непрерывная подача [25c]: среднее время кадров и HTTP, в пачечном режиме этих замеров нет.
         if overlap.get("qwen_continuous"):
             extra["qwen_prep_sec_mean"] = round(float(overlap["qwen_prep_sec_mean"] or 0.0), 3)
             extra["qwen_request_sec_mean"] = round(float(overlap["qwen_request_sec_mean"] or 0.0), 3)
