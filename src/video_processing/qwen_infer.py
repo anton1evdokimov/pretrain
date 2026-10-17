@@ -14,10 +14,8 @@ from video_processing.decode import (
 )
 from video_processing.device import pick_torch_device, release_memory, sync
 
-USER_PROMPT = "Сгенерируй детальное описание всего, что происходит на видео"
 
-
-# [10] Фабрика captioner: vLLM или Transformers.
+# Фабрика captioner: vLLM или Transformers.
 def make_captioner(cfg: QwenConfig, device: str = "auto"):
     if cfg.backend == "vllm":
         from video_processing.qwen_vllm import VllmCaptioner
@@ -31,7 +29,7 @@ def make_captioner(cfg: QwenConfig, device: str = "auto"):
 
 
 class QwenCaptioner:
-    # Ветка transformers. Основной прогон создаёт VllmCaptioner, не этот класс.
+    # Запасной путь. Основной прогон создаёт VllmCaptioner, не этот класс.
     def __init__(self, cfg: QwenConfig, device: str = "auto"):
         self.cfg = cfg
         self.device = pick_torch_device(device)
@@ -41,7 +39,7 @@ class QwenCaptioner:
         self.engine = "transformers"
         self.attn_implementation = None
 
-    # Ветка transformers: грузит Qwen3-VL в этот процесс.
+    # Грузит Qwen3-VL в этот процесс.
     def load(self) -> None:
         from transformers import AutoProcessor
 
@@ -88,13 +86,13 @@ class QwenCaptioner:
         self._processor.tokenizer.padding_side = "left"
         self.dtype = dtype
 
-    # Ветка transformers: отпускает модель.
+    # Отпускает модель.
     def unload(self) -> None:
         self._model = None
         self._processor = None
         release_memory()
 
-    # Ветка transformers: те же [45]–[48], что и у vLLM.
+    # Те же шаги подготовки кадров, что у vLLM.
     def prepare_frames(self, path: Path) -> list[Image.Image]:
         meta = probe_video(path)
         indices = uniform_indices(meta["nb_frames"], self.cfg.num_frames)
@@ -104,21 +102,20 @@ class QwenCaptioner:
         )
         return frames_as_pil(captured, indices)
 
-    # Ветка transformers: один ролик через caption_batch.
+    # Один ролик через caption_batch.
     def caption(self, path: Path, frames: list[Image.Image] | None = None) -> str:
         images = frames if frames is not None else self.prepare_frames(path)
         return self.caption_batch([(path, images)])[0][0]
 
-    # Ветка transformers: один generate на пачку, do_sample если temperature > 0.
+    # Один generate на пачку, do_sample если temperature > 0.
     # Как у vLLM: (текст, finish_reason, токенов промпта), "length" — без EOS до max_tokens.
     def caption_batch(
         self, items: list[tuple[Path, list[Image.Image]]]
     ) -> list[tuple[str, str, int]]:
         if self._model is None or self._processor is None:
             self.load()
-        prompt = self.cfg.prompt or USER_PROMPT
         messages_batch = [
-            _messages(images, prompt, self.cfg.system_prompt) for _, images in items
+            _messages(images, self.cfg.prompt, self.cfg.system_prompt) for _, images in items
         ]
         inputs = _prepare_inputs(self._processor, messages_batch)
         inputs = _to_device(inputs, self._model.device)
@@ -151,7 +148,7 @@ class QwenCaptioner:
         ]
 
 
-# Ветка transformers: класс Qwen3-VL из установленного пакета.
+# Класс Qwen3-VL из установленного пакета.
 def _model_class():
     import transformers
 
@@ -164,7 +161,7 @@ def _model_class():
     raise RuntimeError("нужен transformers>=4.57 с Qwen3-VL")
 
 
-# Ветка transformers: sdpa, при возможности flash_attention_2.
+# sdpa, при возможности flash_attention_2.
 def _attn_candidates(requested: str, device: str) -> list[str | None]:
     if requested and requested != "auto":
         return [requested, "sdpa", None]
@@ -173,7 +170,7 @@ def _attn_candidates(requested: str, device: str) -> list[str | None]:
     return ["sdpa", None]
 
 
-# Ветка transformers: кадры и промпт в формате чата.
+# Кадры и промпт в формате чата.
 def _messages(images: list[Image.Image], prompt: str, system: str = "") -> list[dict]:
     content = [{"type": "image", "image": image} for image in images]
     content.append({"type": "text", "text": prompt})
@@ -183,7 +180,7 @@ def _messages(images: list[Image.Image], prompt: str, system: str = "") -> list[
     return messages
 
 
-# Ветка transformers: токены и пиксели пачки.
+# Токены и пиксели пачки.
 def _prepare_inputs(processor, messages_batch: list):
     try:
         return processor.apply_chat_template(
@@ -195,43 +192,16 @@ def _prepare_inputs(processor, messages_batch: list):
             padding=True,
         )
     except TypeError:
-        try:
-            return processor.apply_chat_template(
-                messages_batch[0] if len(messages_batch) == 1 else messages_batch,
-                add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
-                return_tensors="pt",
-            )
-        except Exception:
-            return _prepare_inputs_legacy(processor, messages_batch)
-    except Exception:
-        return _prepare_inputs_legacy(processor, messages_batch)
+        return processor.apply_chat_template(
+            messages_batch[0] if len(messages_batch) == 1 else messages_batch,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
 
 
-# Ветка transformers: старый процессор, если прямой вызов не принял картинки.
-def _prepare_inputs_legacy(processor, messages_batch):
-    try:
-        from qwen_vl_utils import process_vision_info
-    except ImportError as exc:
-        raise RuntimeError(
-            "процессор не принял изображения напрямую, установите qwen-vl-utils"
-        ) from exc
-    texts = [
-        processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        for messages in messages_batch
-    ]
-    image_inputs, video_inputs = process_vision_info(messages_batch)
-    return processor(
-        text=texts,
-        images=image_inputs,
-        videos=video_inputs,
-        padding=True,
-        return_tensors="pt",
-    )
-
-
-# Ветка transformers: тензоры на GPU.
+# Тензоры на GPU.
 def _to_device(inputs, device):
     if hasattr(inputs, "to"):
         return inputs.to(device)

@@ -25,12 +25,12 @@ from video_processing.decode import (
 from video_processing.device import pick_torch_device
 
 
-# [17] Команда vllm serve для [16]: dtype и контекст из конфига (bf16, 4096),
+# Команда vllm serve для: dtype и контекст из конфига (bf16, 4096),
 # max_pixels = max_side², у input: video — ещё × num_frames.
 def vllm_serve_command(cfg: QwenConfig, gpu_memory_utilization: float | None = None) -> list[str]:
     seqs = max(int(cfg.max_num_seqs), int(cfg.batch_size), 1)
     util = cfg.gpu_memory_utilization if gpu_memory_utilization is None else gpu_memory_utilization
-   # Bound max_pixels to avoid OOM during vLLM startup profiling.
+    # Bound max_pixels to avoid OOM during vLLM startup profiling.
     pixels = max(int(cfg.max_side) * int(cfg.max_side), 4096)
     video = cfg.input == "video"
     if video:
@@ -75,7 +75,7 @@ def vllm_serve_command(cfg: QwenConfig, gpu_memory_utilization: float | None = N
 class VllmCaptioner:
     concurrent = True
 
-    # [11] Клиент ещё без процесса. Сервер поднимает [15].
+    # Клиент ещё без процесса сервера.
     def __init__(self, cfg: QwenConfig, device: str = "auto"):
         self.cfg = cfg
         self.device = pick_torch_device(device)
@@ -88,13 +88,13 @@ class VllmCaptioner:
         self._mem_util: float | None = None
 
     @property
-    # [18a] http://127.0.0.1:порт, либо api_base из конфига.
+    # http://127.0.0.1:порт, либо api_base из конфига.
     def api_base(self) -> str:
         if self.cfg.api_base:
             return self.cfg.api_base.rstrip("/")
         return f"http://127.0.0.1:{self.cfg.port}"
 
-    # [15] Спавнит сервер [16] и ждёт /health [18].
+    # Спавнит сервер и ждёт /health.
     def load(self, gpu_memory_utilization: float | None = None) -> None:
         self._mem_util = gpu_memory_utilization
         if self.device != "cuda":
@@ -112,7 +112,7 @@ class VllmCaptioner:
             self._spawn()
         self._wait_until_ready()
 
-    # [54] SIGTERM группе процесса vLLM.
+    # SIGTERM группе процесса vLLM.
     def unload(self) -> None:
         proc = self._proc
         self._proc = None
@@ -133,7 +133,7 @@ class VllmCaptioner:
             self._log.close()
             self._log = None
 
-    # [44] 8 кадров ролика: [29], [45], декодер [44d], [48].
+    # Кадры ролика: индексы, декодер, PIL.
     def prepare_frames(self, path: Path) -> list[Image.Image]:
         meta = probe_video(path)
         indices = uniform_indices(meta["nb_frames"], self.cfg.num_frames)
@@ -143,27 +143,28 @@ class VllmCaptioner:
         )
         return frames_as_pil(captured, indices)
 
-    # Один ролик через [49]. Основной прогон идёт через [49c], а [25q] — через [49].
+    # Один ролик. Основной прогон идёт через caption_one, пачки — через caption_batch.
     def caption(self, path: Path, frames: list[Image.Image] | None = None) -> str:
         images = frames if frames is not None else self.prepare_frames(path)
         return self.caption_batch([(path, images)])[0][0]
 
-    # [49c] Один ролик без пачки: непрерывная подача [25c] держит vLLM полным.
+    # Один ролик без пачки: непрерывная подача держит vLLM полным.
     def caption_one(self, path: Path, frames: list[Image.Image]) -> tuple[str, str, int]:
         return self._caption_one((path, frames))
 
-    # [49] До 32 запросов [50] параллельно. Слоты пакует уже vLLM.
+    # Пачки, когда continuous выключен. Одновременно не больше qwen.batch_size
+    # запросов. Финальный прогон идёт через caption_one.
     # Каждый элемент — (текст, finish_reason, токенов промпта); "length" — обрезано по max_tokens.
     def caption_batch(
         self, items: list[tuple[Path, list[Image.Image]]]
     ) -> list[tuple[str, str, int]]:
         if not items:
             return []
-        workers = min(len(items), 32)
+        workers = min(len(items), max(1, int(self.cfg.batch_size)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(self._caption_one, items))
 
-    # [50] JPEG кадров [51] и POST [52]. Системное сообщение, temperature, штрафы и seed — отсюда.
+    # JPEG кадров и POST. Системное сообщение, temperature, штрафы и seed — отсюда.
     def _caption_one(self, item: tuple[Path, list[Image.Image]]) -> tuple[str, str, int]:
         _, images = item
         content: list[dict] = []
@@ -193,7 +194,7 @@ class VllmCaptioner:
             payload["seed"] = self.cfg.seed
         return _post_chat(self.api_base, payload)
 
-    # [16] Процесс vLLM с командой [17]. Семплер flashinfer выключен, воркеры через spawn.
+    # Процесс vLLM. Семплер flashinfer выключен, воркеры через spawn.
     def _spawn(self) -> None:
         cmd = vllm_serve_command(self.cfg, self._mem_util)
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -216,7 +217,7 @@ class VllmCaptioner:
             start_new_session=True,
         )
 
-    # [18] Ждёт /health. Если процесс умер, в ошибку попадает [18b].
+    # Ждёт /health. Если процесс умер, в ошибку попадает хвост лога.
     def _wait_until_ready(self, timeout_sec: float = 1200) -> None:
         deadline = time.perf_counter() + timeout_sec
         health = self.api_base + "/health"
@@ -238,7 +239,7 @@ class VllmCaptioner:
         )
 
 
-# [51] Кадр уже уменьшен, здесь только JPEG в base64 / data-url.
+# Кадр уже уменьшен, здесь только JPEG в base64 / data-url.
 def _jpeg_base64(image: Image.Image) -> str:
     buf = io.BytesIO()
     image.convert("RGB").save(buf, format="JPEG", quality=90)
@@ -249,7 +250,7 @@ def _jpeg_data_url(image: Image.Image) -> str:
     return f"data:image/jpeg;base64,{_jpeg_base64(image)}"
 
 
-# [52] POST /v1/chat/completions: текст подписи, finish_reason и токенов промпта.
+# POST /v1/chat/completions: текст подписи, finish_reason и токенов промпта.
 def _post_chat(api_base: str, payload: dict) -> tuple[str, str, int]:
     req = urllib.request.Request(
         api_base.rstrip("/") + "/v1/chat/completions",
@@ -273,7 +274,7 @@ def _post_chat(api_base: str, payload: dict) -> tuple[str, str, int]:
     )
 
 
-# [18b] Кусок лога vLLM с настоящей ошибкой EngineCore, не обёртка в хвосте.
+# Кусок лога vLLM с настоящей ошибкой EngineCore, не обёртка в хвосте.
 def _failure_excerpt(path: Path) -> str:
     """The process exit is a short wrapper. The cause is the earlier EngineCore error."""
     if not path.exists():

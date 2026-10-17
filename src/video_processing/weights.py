@@ -9,7 +9,7 @@ DOVER_URLS = [
 ]
 
 
-# [21] DOVER.pth на диске. Если файла нет, качает через [21a].
+# DOVER.pth на диске. Если файла нет, скачивает.
 def ensure_dover_weights(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.stat().st_size > 1_000_000:
@@ -22,15 +22,14 @@ def ensure_dover_weights(path: Path) -> Path:
                 return path
         except Exception as exc:
             last_error = exc
-    raise RuntimeError(f"не удалось скачать DOVER.pth: {last_error}")
+    raise RuntimeError(f"не удалось скачать DOVER.pth: {last_error}") from last_error
 
 
-# [21a] Запасной путь [21]: скачать чекпоинт, в обычном прогоне не вызывается.
+# Скачивает DOVER.pth. В обычном прогоне файл уже лежит в weights/.
 def _download(url: str, path: Path) -> None:
-    from huggingface_hub import hf_hub_download
-    from huggingface_hub.utils import HfHubHTTPError
-
     if "huggingface.co" in url:
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.utils import HfHubHTTPError
         try:
             downloaded = hf_hub_download(
                 repo_id="teowu/DOVER",
@@ -41,8 +40,8 @@ def _download(url: str, path: Path) -> None:
             if src.resolve() != path.resolve():
                 path.write_bytes(src.read_bytes())
             return
-        except (HfHubHTTPError, Exception):
-            pass
+        except HfHubHTTPError as e:
+            print(f"HF download failed, trying direct URL: {e}")
     import urllib.request
 
     tmp = path.with_suffix(".part")

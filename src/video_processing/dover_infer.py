@@ -28,9 +28,9 @@ def dover_z(aesthetic_raw: float, technical_raw: float) -> tuple[float, float]:
     return (aesthetic_raw + 0.08285) / 0.03774, (technical_raw - 0.1107) / 0.07355
 
 
-# [40] z-score и веса как в evaluate_a_set_of_videos: aesthetic, technical, overall.
+# z-score и веса как в evaluate_a_set_of_videos: aesthetic, technical, overall.
 def fuse_results(results: list[float]) -> dict[str, float]:
-    # results[0] aesthetic, results[1] technical
+    # results[0] — aesthetic, results[1] — technical
     aesthetic_z, technical_z = dover_z(results[0], results[1])
     fused = technical_z * 0.6104 + aesthetic_z * 0.3896
     return {
@@ -41,7 +41,7 @@ def fuse_results(results: list[float]) -> dict[str, float]:
 
 
 class DoverScorer:
-    # [8] Пока только конфиг и устройство [9]. Веса грузит [19].
+    # Конфиг и устройство. Веса загружает load.
     def __init__(self, cfg: DoverConfig):
         self.cfg = cfg
         self.device = pick_torch_device(cfg.device)
@@ -50,7 +50,7 @@ class DoverScorer:
         self._samplers = None
         self._streams = threading.local()
 
-    # [19] Чекпоинт, семплеры [22] и сама сеть. Выключение checkpointing — здесь же.
+    # Чекпоинт, семплеры и сама сеть. Выключение checkpointing — здесь же.
     def load(self) -> None:
         self._ensure_third_party()
         weights = ensure_dover_weights(self.cfg.weights)
@@ -70,12 +70,12 @@ class DoverScorer:
         model.to(self.device)
         self._model = model
 
-    # [53] Снимает DOVER с GPU после обоих потоков.
+    # Снимает DOVER с GPU после обоих потоков.
     def unload(self) -> None:
         self._model = None
         release_memory()
 
-    # [27s] Поток пачек для основного прогона. Декод идёт в пуле без барьера на
+    # Поток пачек для основного прогона. Декод идёт в пуле без барьера на
     # границе батча: длинный ролик не держит остальные воркеры, пачка собирается
     # из тех, что готовы первыми. Отдаёт (индексы items, скоры) не по порядку.
     def iter_scores(
@@ -126,8 +126,8 @@ class DoverScorer:
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
 
-    # [28p] Подготовка одного ролика: NVDEC [28n] или CPU [28], затем нормализация [37].
-    # Зовётся из пула [27s].
+    # Подготовка одного ролика: NVDEC или CPU, затем нормализация.
+    # Вызывается из пула декодирования.
     def prepare(self, path: Path, ffmpeg_threads: int = 1) -> dict[str, torch.Tensor]:
         if self.cfg.decoder == "nvdec" and str(self.device).startswith("cuda"):
             try:
@@ -142,7 +142,7 @@ class DoverScorer:
         )
         return normalize_and_split(views, self._sample_types, "cpu")
 
-    # [28n] [28g] и [37] на своём CUDA stream потока пула: подготовка не ждёт forward
+    # Подготовка на своём CUDA stream потока пула: не ждёт forward
     # на default stream.
     def _prepare_nvdec(self, path: Path) -> dict[str, torch.Tensor]:
         stream = getattr(self._streams, "stream", None)
@@ -154,7 +154,7 @@ class DoverScorer:
         stream.synchronize()
         return prepared
 
-    # [37f] Один forward DOVER на уже подготовленные ролики, затем [38], [39], [40].
+    # Один forward DOVER на уже подготовленные ролики.
     def score_prepared(self, prepared: list[dict[str, torch.Tensor]]) -> list[dict[str, float]]:
         n_videos = len(prepared)
         aesthetic = torch.cat([item["aesthetic"] for item in prepared], dim=0)
@@ -166,7 +166,7 @@ class DoverScorer:
         aes_clips = self._sample_types["aesthetic"].get("num_clips", 1)
         tech_clips = self._sample_types["technical"].get("num_clips", 1)
         if aesthetic.is_cuda:
-            # Виды [28n] выделены на stream воркера: до освобождения cat должен
+            # Виды выделены на stream воркера: до освобождения cat должен
             # дочитать их, иначе аллокатор отдаст память следующему ролику.
             torch.cuda.current_stream().synchronize()
         del prepared, aesthetic, technical
@@ -195,7 +195,7 @@ class DoverScorer:
         return max(1, min(workers, n_items))
 
     @staticmethod
-    # [20] Кладёт third_party/DOVER в sys.path без импорта decord.
+    # Кладёт third_party/DOVER в sys.path без импорта decord.
     def _ensure_third_party() -> None:
         dover_root = ROOT / "third_party" / "DOVER"
         pkg_dir = dover_root / "dover"
@@ -214,7 +214,7 @@ class DoverScorer:
         sys.modules["dover"] = pkg
 
     @staticmethod
-    # [24] ConvNeXt не качает ImageNet: DOVER.pth всё равно перезаписывает веса.
+    # ConvNeXt не качает ImageNet: DOVER.pth всё равно перезаписывает веса.
     def _disable_convnext_imagenet_init() -> None:
         import dover.models.conv_backbone as conv_backbone
         import dover.models.evaluator as evaluator
@@ -228,7 +228,7 @@ class DoverScorer:
         evaluator.convnext_3d_tiny = _tiny
 
 
-# [39] Сырой скор ветки: среднее по клипам одного ролика.
+# Сырой скор ветки: среднее по клипам одного ролика.
 def _mean_per_video(tensor: torch.Tensor, n_videos: int, clips: int) -> list[float]:
     values = tensor.detach().float().reshape(n_videos, clips, -1).mean(dim=(1, 2))
     return [float(x) for x in values.cpu()]

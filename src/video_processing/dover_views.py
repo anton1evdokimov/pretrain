@@ -22,7 +22,7 @@ STD = torch.FloatTensor([58.395, 57.12, 57.375])
 
 
 class UnifiedFrameSampler:
-    # [23] Параметры одной ветки из dover.yml: кадров в отрезке, число отрезков, шаг, повторы.
+    # Параметры одной ветки из dover.yml: кадров в отрезке, число отрезков, шаг, повторы.
     def __init__(self, fsize_t, fragments_t, frame_interval=1, num_clips=1, drop_rate=0.0):
         self.fragments_t = fragments_t
         self.fsize_t = fsize_t
@@ -30,7 +30,7 @@ class UnifiedFrameSampler:
         self.num_clips = num_clips
         self.drop_rate = drop_rate
 
-    # [31] fragments_t отрезков по fsize_t кадров, у каждого свой случайный сдвиг.
+    # fragments_t отрезков по fsize_t кадров, у каждого свой случайный сдвиг.
     # С dover.yml: technical — 3 отрезка по 32 кадра (3 клипа), aesthetic — 32 по 1 кадру.
     def get_frame_indices(self, num_frames: int) -> np.ndarray:
         tgrids = np.array(
@@ -51,14 +51,14 @@ class UnifiedFrameSampler:
         )
         return np.concatenate(ranges_t)
 
-    # [30] Индексы ветки: [31] num_clips раз (в dover.yml — один). np.random, поэтому под lock.
+    # Индексы ветки: num_clips раз (в dover.yml — один). np.random, поэтому под lock.
     def __call__(self, total_frames: int) -> np.ndarray:
         frame_inds = [self.get_frame_indices(total_frames) for _ in range(self.num_clips)]
         frame_inds = np.concatenate(frame_inds)
         return np.mod(frame_inds, max(total_frames, 1)).astype(np.int32)
 
 
-# [22] По семплеру на aesthetic и technical. Один раз при [19].
+# По семплеру на aesthetic и technical. Один раз при.
 def make_samplers(sample_types: dict) -> dict[str, UnifiedFrameSampler]:
     samplers = {}
     for stype, sopt in sample_types.items():
@@ -76,7 +76,7 @@ def make_samplers(sample_types: dict) -> dict[str, UnifiedFrameSampler]:
     return samplers
 
 
-# [32] Случайные окна 7×7 для technical. Сетка общая, сдвиг окон свой на каждый блок
+# Случайные окна 7×7 для technical. Сетка общая, сдвиг окон свой на каждый блок
 # из aligned=32 кадров, то есть на каждый из 3 клипов.
 def _fragment_coords(h: int, w: int, t: int, sopt: dict):
     fragments_h = sopt["fragments_h"]
@@ -111,7 +111,7 @@ def _fragment_coords(h: int, w: int, t: int, sopt: dict):
     }
 
 
-# [36t] Кладёт фрагменты кадра сразу в тензор 224², полный кадр не хранит.
+# Кладёт фрагменты кадра сразу в тензор 224², полный кадр не хранит.
 def _fill_fragments(target: torch.Tensor, rgb: np.ndarray, t: int, coords: dict) -> None:
     aligned = coords["aligned"]
     block = min(t // aligned, coords["rnd_h"].shape[-1] - 1)
@@ -127,7 +127,7 @@ def _fill_fragments(target: torch.Tensor, rgb: np.ndarray, t: int, coords: dict)
             target[:, t, h_s:h_e, w_s:w_e] = frame[:, h_so:h_eo, w_so:w_eo]
 
 
-# [36a] Кадр aesthetic → 224².
+# Кадр aesthetic → 224².
 # Fusion-константы и dover_predictions/*.pkl получены на torch~=1.13, где Resize
 # по uint8-тензору шёл без antialias. С antialias=True aesthetic уезжает на ~1.5σ
 # (scripts/dover_parity.py --demo).
@@ -138,7 +138,7 @@ def _resize_to_chw(rgb: np.ndarray, size_h: int, size_w: int) -> torch.Tensor:
     )
 
 
-# [28] Один ролик: индексы, ffmpeg [34], сборка клипов на CPU.
+# Один ролик: индексы, ffmpeg, сборка клипов на CPU.
 def decompose_video(
     path: Path,
     sample_types: dict,
@@ -202,7 +202,7 @@ def _ordered_views(aesthetic, technical) -> dict[str, torch.Tensor]:
     return views
 
 
-# [32g] Левые верхние углы окон [32] для каждого слота technical: [T, fh, fw].
+# Левые верхние углы окон для каждого слота technical: [T, fh, fw].
 def _fragment_offsets(coords: dict, n_slots: int, device) -> tuple[torch.Tensor, torch.Tensor]:
     blocks = torch.clamp(
         torch.arange(n_slots) // coords["aligned"], max=coords["rnd_h"].shape[-1] - 1
@@ -214,7 +214,7 @@ def _fragment_offsets(coords: dict, n_slots: int, device) -> tuple[torch.Tensor,
     return h0.to(device), w0.to(device)
 
 
-# [36g] Все окна [36t] пачки кадров одним gather: frames [n,3,H,W] → target[:, slots].
+# Все окна пачки кадров одним gather: frames [n,3,H,W] → target[:, slots].
 def _fill_fragments_gpu(
     target: torch.Tensor,
     frames: torch.Tensor,
@@ -240,8 +240,8 @@ def _fill_fragments_gpu(
     )
 
 
-# [28g] То же, что [28], но кадры декодирует NVDEC (torchcodec), а resize и окна
-# считаются на GPU. Порядок вызовов RNG как в [28], поэтому при равном seed
+# То же, что, но кадры декодирует NVDEC (torchcodec), а resize и окна
+# считаются на GPU. Порядок вызовов RNG как в, поэтому при равном seed
 # индексы и окна совпадают с CPU-путём.
 def decompose_video_nvdec(
     path: Path,
@@ -313,8 +313,8 @@ def decompose_video_nvdec(
     return _ordered_views(aesthetic, technical)
 
 
-# [37] Нормализация ImageNet и раскладка по клипам. Зовётся из пула [28p]. После [28g]
-# тензоры уже на GPU; CPU-путь остаётся на cpu, на GPU их переносит [37f].
+# Нормализация ImageNet и раскладка по клипам. Зовётся из пула. После 
+# тензоры уже на GPU; CPU-путь остаётся на cpu, на GPU их переносит.
 def normalize_and_split(views: dict[str, torch.Tensor], sample_types: dict, device: str) -> dict[str, torch.Tensor]:
     prepared = {}
     for key, video in views.items():

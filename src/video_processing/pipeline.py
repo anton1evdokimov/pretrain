@@ -20,23 +20,6 @@ from video_processing.qwen_infer import QwenCaptioner, make_captioner
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 
-# Порядок основного прогона с configs/default.yaml (parallel, vLLM, NVDEC, continuous).
-# Номер стоит над функцией.
-# 1 main → 2 load_config (3 _as_path) → 4 configure_cuda → 5 run_pipeline
-# 6 list_videos → 7 expand → 8 DoverScorer (9 устройство) → 10 make_captioner → 11 VllmCaptioner
-# → 12 gpu_name → 13 _run_overlapped
-# 14 _load_qwen → 15 load → 16 _spawn (17 команда) → 18 /health → 19..24 загрузка DOVER
-# дальше одновременно:
-#   25d produce → 27s iter_scores → 28p prepare (пул) → 28n stream → 28g NVDEC: 29 ffprobe,
-#       30..31 индексы, 32..32g окна, 36g gather → 37 нормализация → 37f forward → 38 sync
-#       → 39 среднее по клипам → 40 fuse → 41 отметка
-#   25c consume_continuous → 44 кадры: 29, 45, 44d → 46n NVDEC → 47 resize → 48 PIL
-#       → 49c → 50 → 51 JPEG → 52 POST → 52r запись подписи → 41 отметка
-# 42 окно замера → 53–54 unload → 55 скорость (56 среднее) → 56s статистика подписей
-# → 57 запись → 58 RESULTS.md → 59 release_memory
-# Без qwen.continuous вместо 25c идёт 25q: 26 _chunks → 43 → 44 → 49 → 50 …
-# С decoder: cpu или при ошибке NVDEC вместо 28n/28g идёт 28 (33–35, 36t, 36a), вместо 46n — 46.
-
 
 @dataclass
 class VideoResult:
@@ -54,7 +37,7 @@ class VideoResult:
     qwen_sec: float
 
 
-# [6] Файлы video/ с известным расширением, по имени.
+# Файлы video/ с известным расширением, по имени.
 def list_videos(input_dir: Path) -> list[Path]:
     videos = [
         path
@@ -66,22 +49,22 @@ def list_videos(input_dir: Path) -> list[Path]:
     return videos
 
 
-# [7] 10 роликов × replicate. В таблицу потом пойдёт только копия 0.
+# 10 роликов × replicate. В таблицу потом пойдёт только копия 0.
 def expand_for_throughput(videos: list[Path], replicate: int) -> list[tuple[int, Path]]:
     replicate = max(1, replicate)
     return [(copy, path) for copy in range(replicate) for path in videos]
 
 
-# [26] Режет список джобов на пачки Qwen для [25q] и последовательного режима.
-# DOVER собирает пачки сам в [27s].
+# Режет список заданий на пачки Qwen, когда continuous выключен.
+# DOVER собирает свои пачки сам.
 def _chunks(items: list, size: int):
     size = max(1, size)
     for start in range(0, len(items), size):
         yield items[start : start + size]
 
 
-# Доля VRAM процесса vLLM; DOVER берёт остаток в родительском процессе.
-# 2B в bf16 хватает половины, а forward DOVER на batch 16 просит ~11 GiB одним блоком.
+# Доля VRAM процесса vLLM в параллельном режиме. 2B в bf16 помещается в половину
+# A100, остаток остаётся DOVER в родительском процессе.
 OVERLAP_VLLM_FRACTION = 0.50
 
 # Доля уникальных 8-грамм слов ниже этого порога — описание зациклилось.
@@ -94,7 +77,7 @@ def _uniq8(text: str) -> float:
     return len(set(grams)) / len(grams) if grams else 1.0
 
 
-# [52r] Одна подпись любого джоба, не только копии 0: качество меряется по всем копиям.
+# Одна подпись любого джоба, не только копии 0: качество меряется по всем копиям.
 def _caption_record(index: int, copy: int, path: Path, text: str, finish: str, tokens: int) -> dict:
     return {
         "job": index,
@@ -108,7 +91,7 @@ def _caption_record(index: int, copy: int, path: Path, text: str, finish: str, t
     }
 
 
-# [56s] По каждому ролику: сколько копий обрезано и зациклилось, средняя длина.
+# По каждому ролику: сколько копий обрезано и зациклилось, средняя длина.
 def _caption_stats(records: list[dict], videos: list[Path]) -> dict:
     stats = {}
     for path in videos:
@@ -126,7 +109,7 @@ def _caption_stats(records: list[dict], videos: list[Path]) -> dict:
     return stats
 
 
-# [42] Часы видео/с по событиям «ролик закончили оба потока».
+# Часы видео/с по событиям «ролик закончили оба потока».
 # Старт — событие, на котором набралось warmup роликов. Стабильное окно кончается,
 # когда любой поток исчерпал список: дальше второй идёт без соседа по GPU/CPU,
 # и такой хвост в бесконечном потоке роликов не повторяется.
@@ -148,7 +131,7 @@ def _steady_window(events: list[tuple[float, int]], warmup: int, end: float | No
     return {"jobs": jobs, "wall": wall}
 
 
-# [5] Основной прогон. При parallel зовёт [13], иначе стадии по очереди.
+# Основной прогон. При parallel стадии идут вместе, иначе по очереди.
 def run_pipeline(cfg: AppConfig, *, write_outputs: bool = True) -> dict:
     videos = list_videos(cfg.input_dir)
     jobs = expand_for_throughput(videos, cfg.replicate)
@@ -318,8 +301,8 @@ def run_pipeline(cfg: AppConfig, *, write_outputs: bool = True) -> dict:
     return payload
 
 
-# [13] Поднимает обе модели и с t=0 пускает [25d] и [25c] (без continuous — [25q])
-# на одном списке роликов.
+# Поднимает обе модели и с t=0 пускает DOVER и Qwen на одном списке роликов.
+# Без continuous Qwen идёт пачками.
 def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
     """Both models get the full job list from t=0.
 
@@ -343,7 +326,7 @@ def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
     truncated = [0]
     caption_records: list[dict] = []
 
-    # [41] Ролик готов для замера, когда отметку поставили и DOVER, и Qwen.
+    # Ролик готов для замера, когда отметку поставили и DOVER, и Qwen.
     def _mark(kind: str, indices, now: float) -> None:
         with lock:
             store = dover_done if kind == "dover" else qwen_done
@@ -356,7 +339,7 @@ def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
             if newly:
                 events.append((now, newly))
 
-    # [25d] Поток DOVER: пачки [27s] до конца списка.
+    # Поток DOVER: пачки до конца списка.
     def produce() -> None:
         n_done = 0
         stage_t0 = last = time.perf_counter()
@@ -383,8 +366,8 @@ def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
             bar.close()
             overlap["dover_stage_sec"] = time.perf_counter() - stage_t0
 
-    # [25q] Поток Qwen пачками: кадры [43], затем подписи [49]. Идёт вместо [25c],
-    # если qwen.continuous выключен или бэкенд не принимает параллельные запросы.
+# Поток Qwen пачками: сначала кадры, потом подписи. Идёт вместо непрерывной подачи,
+# если qwen.continuous выключен или бэкенд не принимает параллельные запросы.
     def consume() -> None:
         prefetch = ThreadPoolExecutor(max_workers=2)
         job_batches = list(_chunks(jobs, cfg.qwen.batch_size))
@@ -424,7 +407,7 @@ def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
             prefetch.shutdown(wait=False)
             overlap["qwen_stage_sec"] = time.perf_counter() - stage_t0
 
-    # [25c] Поток Qwen без пачек: каждый ролик — своя задача «кадры → запрос».
+    # Поток Qwen без пачек: каждый ролик — своя задача «кадры → запрос».
     # Готовая подпись сразу освобождает место следующему ролику, длинное описание
     # не держит пустыми остальные слоты vLLM. Кадры готовят не больше
     # decode_workers задач одновременно, запросов в полёте до max_num_seqs + decode_workers.
@@ -531,6 +514,7 @@ def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
     both_active_until = min(last_mark.values()) if len(last_mark) == 2 else None
     steady = _steady_window(events, cfg.warmup_videos, both_active_until)
     with_tail = _steady_window(events, cfg.warmup_videos, None)
+    
     return {
         "dover_scores": dover_scores,
         "dover_times": dover_times,
@@ -554,7 +538,7 @@ def _run_overlapped(cfg: AppConfig, dover: DoverScorer, qwen, jobs) -> dict:
     }
 
 
-# [14] Грузит Qwen. В параллельном режиме режет долю VRAM до OVERLAP_VLLM_FRACTION.
+# Грузит Qwen. В параллельном режиме режет долю VRAM до OVERLAP_VLLM_FRACTION.
 def _load_qwen(qwen, cfg: AppConfig, *, overlapped: bool) -> None:
     if overlapped and cfg.qwen.backend == "vllm":
         util = min(float(cfg.qwen.gpu_memory_utilization), OVERLAP_VLLM_FRACTION)
@@ -564,7 +548,7 @@ def _load_qwen(qwen, cfg: AppConfig, *, overlapped: bool) -> None:
     qwen.load()
 
 
-# [43] Кадры следующего батча Qwen, пока текущий ещё считается. Зовёт [44].
+# Кадры следующей пачки Qwen, пока текущая ещё считается.
 # qwen.decode_workers > 1 — ролики пачки декодируются параллельно.
 def _prepare_batch(qwen: QwenCaptioner, batch: list[tuple[int, Path]]):
     paths = [path for _, path in batch]
@@ -577,12 +561,12 @@ def _prepare_batch(qwen: QwenCaptioner, batch: list[tuple[int, Path]]):
     return list(zip(paths, frames))
 
 
-# [56] Среднее, 0 для пустого списка. В [55] — с/видео по замерам после warmup.
+# Среднее, 0 для пустого списка.
 def _mean(values: list[float]) -> float:
     return float(statistics.mean(values)) if values else 0.0
 
 
-# [55] Видео/с по wall-clock перекрытия, не по сумме DOVER и Qwen.
+# Видео/с по wall-clock перекрытия, не по сумме DOVER и Qwen.
 def _throughput_stats(
     n_unique: int,
     n_jobs: int,
@@ -605,7 +589,7 @@ def _throughput_stats(
     steady = overlap.get("steady") or {"jobs": 0, "wall": 0.0}
     with_tail = overlap.get("with_tail") or {"jobs": 0, "wall": 0.0}
     extra: dict = {}
-    # Основной замер parallel: окно [42] после warmup и пока заняты обе стадии.
+    # Основной замер parallel: окно после warmup и пока заняты обе стадии.
     if overlapped and steady["jobs"] > 0 and steady["wall"] > 0:
         stable_samples = steady["jobs"]
         per_video = steady["wall"] / steady["jobs"]
@@ -640,7 +624,7 @@ def _throughput_stats(
             "qwen_end_sec": round(float(overlap.get("qwen_end_sec") or 0.0), 3),
             "qwen_continuous": bool(overlap.get("qwen_continuous")),
         }
-        # Непрерывная подача [25c]: среднее время кадров и HTTP, в пачечном режиме этих замеров нет.
+        # Непрерывная подача: среднее время кадров и HTTP, в пачечном режиме этих замеров нет.
         if overlap.get("qwen_continuous"):
             extra["qwen_prep_sec_mean"] = round(float(overlap["qwen_prep_sec_mean"] or 0.0), 3)
             extra["qwen_request_sec_mean"] = round(float(overlap["qwen_request_sec_mean"] or 0.0), 3)
@@ -667,10 +651,11 @@ def _throughput_stats(
     }
     if attn and attn != "vllm":
         stats["attn_implementation"] = attn
+        
     return stats
 
 
-# [57] results.json, results.csv, throughput.json, captions_all.jsonl и [58].
+# results.json, results.csv, throughput.json, captions_all.jsonl и.
 def _write_outputs(output_dir: Path, payload: dict) -> None:
     (output_dir / "results.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -699,7 +684,7 @@ def _natural_key(name: str) -> tuple:
     return (0, int(stem), "") if stem.isdigit() else (1, 0, name)
 
 
-# [58] RESULTS.md: скорость, статистика подписей по всем копиям и таблица копии 0.
+# RESULTS.md: скорость, статистика подписей по всем копиям и таблица копии 0.
 def _write_markdown(path: Path, payload: dict) -> None:
     t = payload["throughput"]
     gpu = t.get("gpu") or t.get("device")

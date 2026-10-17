@@ -59,7 +59,7 @@ class AppConfig:
     qwen: QwenConfig
 
 
-# [3] Путь из yaml. Относительный считается от корня репозитория.
+# Путь из yaml. Относительный считается от корня репозитория.
 def _as_path(value: str | Path) -> Path:
     path = Path(value)
     if not path.is_absolute():
@@ -67,7 +67,14 @@ def _as_path(value: str | Path) -> Path:
     return path
 
 
-# [2] configs/default.yaml → AppConfig. Пути собирает через [3].
+def _require(section: dict, key: str, cfg_path: Path) -> str:
+    value = section.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"в {cfg_path} нет qwen.{key}")
+    return value.strip()
+
+
+# configs/default.yaml → AppConfig.
 def load_config(path: str | Path | None) -> AppConfig:
     cfg_path = _as_path(path or ROOT / "configs" / "default.yaml")
     raw: dict[str, Any] = yaml.safe_load(cfg_path.read_text()) or {}
@@ -91,12 +98,7 @@ def load_config(path: str | Path | None) -> AppConfig:
         ),
         qwen=QwenConfig(
             model_id=str(qwen_raw.get("model_id", "Qwen/Qwen3-VL-2B-Instruct")),
-            prompt=str(
-                qwen_raw.get(
-                    "prompt",
-                    "Сгенерируй детальное описание всего, что происходит на видео",
-                )
-            ),
+            prompt=_require(qwen_raw, "prompt", cfg_path),
             system_prompt=str(qwen_raw.get("system_prompt") or "").strip(),
             num_frames=int(qwen_raw.get("num_frames", 8)),
             max_side=int(qwen_raw.get("max_side", 384)),

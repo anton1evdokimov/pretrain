@@ -103,7 +103,6 @@ vllm serve Qwen/Qwen3-VL-2B-Instruct \
 
 | Скрипт | Зачем |
 |---|---|
-| `scripts/run_series.sh name config [name config …]` | Прогоны по очереди, у каждого свои `logs/vmstat_*.txt`, `logs/*_stderr.txt` и лог vLLM. В конце — сравнение с `BASE` (по умолчанию `experiments/results_v11`) |
 | `scripts/compare_runs.py dir_a dir_b …` | Скорость и качество подписей нескольких прогонов рядом |
 | `scripts/dover_parity.py [--decoder nvdec] [--demo]` | Входы и оценки DOVER против официального кода. `--demo` — против z-оценок из README DOVER. Печатает в stdout. Сохранены `experiments/results_parity_videos.txt` и `experiments/results_parity_demo.txt` |
 | `scripts/dover_decode_bench.py` | Только подготовка DOVER: CPU против NVDEC, 1 и 8 потоков |

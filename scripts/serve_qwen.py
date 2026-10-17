@@ -15,8 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from video_processing.config import load_config  # noqa: E402
-from video_processing.qwen_vllm import vllm_serve_command  # noqa: E402
+from video_processing.config import load_config
+from video_processing.qwen_vllm import vllm_serve_command
 
 
 def main() -> None:
